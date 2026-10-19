@@ -21,6 +21,7 @@ export interface LitestreamOptions {
   l0RetentionCheckInterval?: string
   envFile?: string
   logFile?: string
+  logLevel?: 'debug' | 'info' | 'warn' | 'error'
 }
 
 interface LitestreamState {
@@ -68,6 +69,7 @@ function generateConfigMulti(dbs: LitestreamOptions[]): string {
   const l0CheckInterval = first.l0RetentionCheckInterval ?? '24h'
   const snapshotInterval = first.snapshotInterval ?? '24h'
   const snapshotRetention = first.retention ?? '720h'
+  const logLevel = first.logLevel ?? 'warn'
 
   assertPositiveDuration(l0Retention, 'l0-retention')
   assertPositiveDuration(l0CheckInterval, 'l0-retention-check-interval')
@@ -87,7 +89,13 @@ function generateConfigMulti(dbs: LitestreamOptions[]): string {
         sync-interval: ${opts.syncInterval ?? '1s'}`
   })
 
-  return `l0-retention: ${l0Retention}
+  // Litestream 0.5 logs to stdout unless told otherwise, and the sidecar reads
+  // only stderr, so without this every replication error was discarded.
+  return `logging:
+  level: ${logLevel}
+  stderr: true
+
+l0-retention: ${l0Retention}
 l0-retention-check-interval: ${l0CheckInterval}
 
 snapshot:

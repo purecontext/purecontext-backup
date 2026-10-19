@@ -19,7 +19,8 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "restore": "node dist/restore.js",
-    "prepublishOnly": "tsc"
+    "prepublishOnly": "tsc",
+    "test": "tsc && node --test --test-concurrency=1 test/*.test.mjs"
   },
   "repository": {
     "type": "git",
@@ -42,5 +43,8 @@
     "onlyBuiltDependencies": [
       "@biomejs/biome"
     ]
+  },
+  "bin": {
+    "purecontext-litestream": "dist/cli.js"
   }
 }

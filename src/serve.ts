@@ -42,6 +42,8 @@ export interface DatabaseStatus {
   restarts: number
   lastError: { at: string; message: string } | null
   health: Health | null
+  // For litestream commands run by hand, such as restore -config.
+  configPath: string
 }
 
 export interface ServiceStatus {
@@ -334,6 +336,7 @@ class Replicator {
       restarts: this.restarts,
       lastError: this.lastError,
       health: this.health,
+      configPath: this.configPath,
     }
   }
 

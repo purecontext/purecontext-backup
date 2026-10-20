@@ -31,6 +31,52 @@ startLitestream({
 
 Litestream runs as a child process. When your server exits, the sidecar exits with it.
 
+## Replication Service
+
+The sidecar ties a replicator to the process that started it. When several processes use one database, as several sessions of one app do, the last to start kills the others' replicator, and the database goes unreplicated once that process exits. The service gives each database a single replicator that outlives its clients.
+
+```ts
+import { registerDatabase } from '@purecontext/litestream'
+
+await registerDatabase({
+  dbPath: './data/my-app.db',
+  replicaPath: 'my-app/my-app.db',
+})
+```
+
+`registerDatabase` starts the service when it is absent, detached so it keeps running after the caller exits, and asks it to replicate the database. Then:
+
+- **One replicator per database.** Registering the same database again with the same settings changes nothing. Changed settings restart its replicator. A different destination is refused until the database is unregistered. Any other litestream process replicating the same file, such as an older sidecar, is stopped first.
+- **Registrations persist.** They are kept in `registry.json` and resumed whenever the service starts. The service stays up while any database is registered and exits after the last one is unregistered.
+- **One service per home.** A lock decides between clients that start it at the same moment, and a lock left by a dead process is reclaimed.
+- **Upgrades.** A client newer than the running service stops it and starts its own version. The registrations carry over.
+- **Supervision.** A replicator that exits is restarted with backoff, up to one minute between attempts.
+- **Health.** Every five minutes the service compares the replica with the local database. It reports a problem when the replica has no change files, so only snapshots are landing. It also reports one when the replica is behind and has received nothing for five minutes. A running process proves nothing on its own.
+
+Credentials resolve in the client, as below, and travel with the registration. The service's own environment is never consulted.
+
+The service lives in `~/.config/purecontext/litestream`, or in `PURECONTEXT_LITESTREAM_HOME` when that is set. That folder holds the socket, lock, registry, the service log `serve.log`, and per-database configs and logs in `dbs/`. The folder is created with mode 700. `registry.json` and the configs in `dbs/` hold the S3 secret key in plain text, so they are created with mode 600, like the sidecar's config.
+
+### Moving from the sidecar
+
+When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on the database when it registers and again at each health check. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
+
+### Command line
+
+```bash
+purecontext-litestream status        # health of every registered database; exit 1 on a problem, 2 when not running
+purecontext-litestream status --json # the same, for other tools
+purecontext-litestream unregister ./data/my-app.db
+purecontext-litestream stop          # registrations are kept
+purecontext-litestream serve         # run in the foreground
+```
+
+`serviceStatus()`, `unregisterDatabase()` and `stopService()` do the same from code.
+
+### File replicas
+
+Set `replicaType: 'file'` and an absolute `replicaPath` to replicate to a local directory instead of S3. No credentials are needed. This works with the sidecar too.
+
 ## Process Isolation
 
 Each caller provides a `name` that uniquely identifies its Litestream instance. The name controls two things:
@@ -109,7 +155,8 @@ Environment variables are loaded non-destructively. If a variable is already set
 | `name` | | `pid-{process.pid}` | Stable identifier for this instance. Controls config filename and orphan detection. |
 | `configDir` | | system temp dir | Directory for the generated Litestream config file. |
 | `dbPath` | yes | | Path to your SQLite database. |
-| `replicaPath` | yes | | Path within the S3 bucket. |
+| `replicaPath` | yes | | Path within the S3 bucket, or an absolute directory for a file replica. |
+| `replicaType` | | `s3` | `s3` or `file`. |
 | `bucket` | | env var | S3 bucket name. |
 | `endpoint` | | env var | S3-compatible endpoint URL. |
 | `region` | | `auto` | S3 region. |

@@ -1,6 +1,6 @@
 {
   "name": "@purecontext/litestream",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Litestream sidecar for SQLite backup — shared across Pure Context projects",
   "type": "module",
   "main": "dist/index.js",

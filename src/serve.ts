@@ -670,7 +670,13 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     if (shuttingDown || existsSync(paths.socket) || readLockPid(paths.lock) !== process.pid) return
     log('socket file is gone; listening again')
     server.closeAllConnections()
-    server.close(() => server.listen(paths.socket))
+    server.close(() => {
+      // A racer may create the path first; a listen error with no listener would
+      // kill the service and orphan its replicators. The next tick retries.
+      const failed = (err: Error) => log(`re-listen failed: ${err.message}`)
+      server.once('error', failed)
+      server.listen(paths.socket, () => server.off('error', failed))
+    })
   }, SOCKET_CHECK_MS)
 
   healthTimer = setInterval(() => {

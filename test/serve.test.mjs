@@ -77,7 +77,17 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
 
   after(async () => {
     for (const f of fixtures) {
-      await stopService(f.paths).catch(() => {})
+      let pid = null
+      try {
+        pid = Number(readFileSync(f.paths.lock, 'utf8'))
+      } catch {}
+      const stopped = await stopService(f.paths).catch(() => false)
+      // A failing test can leave a service no client can reach; its SIGTERM
+      // handler still stops its replicators.
+      if (!stopped && pid && alive(pid)) {
+        process.kill(pid, 'SIGTERM')
+        await until(() => !alive(pid)).catch(() => process.kill(pid, 'SIGKILL'))
+      }
       rmSync(f.home, { recursive: true, force: true })
     }
   })
@@ -287,6 +297,19 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     assert.equal((await registerDatabase(opts(a), paths)).status, 'started')
     const status = await serviceStatus({}, paths)
     assert.equal(Number(readFileSync(paths.lock, 'utf8')), status.pid)
+    a.db.close()
+  })
+
+  test('a service whose socket file was removed listens again', async () => {
+    const { home, paths, opts } = make()
+    const a = makeDb(home, 'a.db')
+    await registerDatabase(opts(a), paths)
+    const { pid } = await serviceStatus({}, paths)
+    rmSync(paths.socket)
+    await until(() => existsSync(paths.socket), 15_000)
+    const status = await serviceStatus({}, paths)
+    assert.equal(status.pid, pid)
+    assert.equal(status.dbs[0].state, 'running')
     a.db.close()
   })
 

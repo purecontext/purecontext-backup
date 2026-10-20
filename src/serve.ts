@@ -59,6 +59,7 @@ const SETTLE_MS = 60_000
 const IDLE_EXIT_MS = 30_000
 const STABLE_RUN_MS = 5 * 60_000
 const CRASH_WINDOW_MS = 15 * 60_000
+const SOCKET_CHECK_MS = 5_000
 const LOG_CAP_BYTES = 1_000_000
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -506,6 +507,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
 
   let idleTimer: NodeJS.Timeout | null = null
   let healthTimer: NodeJS.Timeout | null = null
+  let socketTimer: NodeJS.Timeout | null = null
   let shuttingDown = false
 
   const status = (): ServiceStatus => {
@@ -525,6 +527,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     shuttingDown = true
     log(`shutting down: ${why}`)
     if (healthTimer) clearInterval(healthTimer)
+    if (socketTimer) clearInterval(socketTimer)
     if (idleTimer) clearTimeout(idleTimer)
     server.close()
     await Promise.all([...replicators.values()].map((r) => r.stop()))
@@ -660,6 +663,15 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     await r.start().catch((err) => log(`cannot start ${spec.dbPath}: ${firstLine(err)}`))
   }
   armIdleExit()
+
+  // A racer that lost the lock late may already have unlinked our socket, and
+  // a client that finds no socket gets bounced by our lock; listen again.
+  socketTimer = setInterval(() => {
+    if (shuttingDown || existsSync(paths.socket) || readLockPid(paths.lock) !== process.pid) return
+    log('socket file is gone; listening again')
+    server.closeAllConnections()
+    server.close(() => server.listen(paths.socket))
+  }, SOCKET_CHECK_MS)
 
   healthTimer = setInterval(() => {
     for (const r of replicators.values()) {

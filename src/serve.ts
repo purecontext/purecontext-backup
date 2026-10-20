@@ -123,7 +123,7 @@ function configFromArgs(args: string): string | null {
 const LISTING_BUFFER = 256 * 1024 * 1024
 
 async function foreignReplicators(dbPath: string, own: Set<number>): Promise<number[]> {
-  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,args='])
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,args='], { maxBuffer: LISTING_BUFFER })
   const found: number[] = []
   for (const line of stdout.split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/)
@@ -191,18 +191,33 @@ class Replicator {
     this.lastError = { at: new Date().toISOString(), message }
   }
 
+  // Never rejects: a start that fails goes to backoff and is retried, so no
+  // caller (a registration, the resume, a retry) can leave it stuck.
   async start(): Promise<void> {
     this.stopping = false
+    try {
+      await this.launch()
+    } catch (err) {
+      this.noteError(firstLine(err))
+      this.failures++
+      this.backoff(`replicator did not start: ${firstLine(err)}`)
+    }
+  }
+
+  private async launch(): Promise<void> {
     writeFileSync(this.configPath, generateConfig([this.spec]), { mode: 0o600 })
 
     // One owner per database: a second replicator on the same file corrupts
     // its local state, so any other one (an older in-process sidecar) yields.
-    let foreign: number[] = []
+    // When the scan fails, no replicator starts: two on one database is
+    // worse than a delayed start.
+    let foreign: number[]
     try {
       foreign = await foreignReplicators(this.spec.dbPath, this.own())
     } catch (err) {
-      this.noteError(`cannot list processes to check for another replicator: ${firstLine(err)}`)
+      throw new Error(`cannot list processes to check for another replicator: ${firstLine(err)}`)
     }
+    if (this.stopping) return
     for (const pid of foreign) {
       log(`stopping another replicator on ${this.spec.dbPath} (pid ${pid})`)
       this.write(`stopped another replicator on this database (pid ${pid})`)
@@ -248,12 +263,21 @@ class Replicator {
     this.failures = ran > STABLE_RUN_MS ? 1 : this.failures + 1
     this.restarts++
     this.exits = [...this.exits.filter((t) => Date.now() - t < CRASH_WINDOW_MS), Date.now()]
-    const delay = Math.min(60_000, 1000 * 2 ** (this.failures - 1))
+    this.backoff(`replicator exited (code ${code})`)
+  }
+
+  private backoff(why: string): void {
+    if (this.stopping) {
+      this.state = 'stopped'
+      return
+    }
+    const delay = Math.min(60_000, 1000 * 2 ** Math.max(0, this.failures - 1))
     this.state = 'backoff'
-    this.write(`replicator exited (code ${code}); restarting in ${delay / 1000}s`)
+    this.write(`${why}; restarting in ${delay / 1000}s`)
+    if (this.retry) clearTimeout(this.retry)
     this.retry = setTimeout(() => {
       this.retry = null
-      this.start().catch((err) => this.noteError(`restart failed: ${firstLine(err)}`))
+      void this.start()
     }, delay)
   }
 
@@ -291,7 +315,10 @@ class Replicator {
           maxBuffer: LISTING_BUFFER,
         })
         const row = JSON.parse(stdout).find((r: { database: string }) => r.database === dbPath)
+        // Without the local position, "behind" cannot be computed, and a
+        // replica that stopped receiving changes would pass as current.
         if (row) health.localTxid = Number.parseInt(row.local_txid, 16)
+        else problems.push('litestream status has no row for this database, so replica lag cannot be measured')
       } catch (err) {
         problems.push(`cannot read local status: ${firstLine(err)}`)
       }
@@ -309,7 +336,10 @@ class Replicator {
         if (changes.length === 0) {
           if (settled) problems.push('the replica has no change files, so only snapshots are landing')
         } else {
-          health.newestChangeAt = changes.map((f) => f.timestamp).sort().at(-1)
+          health.newestChangeAt = changes
+            .map((f) => f.timestamp)
+            .sort()
+            .at(-1)
           const behind = (health.localTxid ?? 0) - (health.remoteTxid ?? 0)
           const age = Date.now() - Date.parse(health.newestChangeAt ?? '')
           if (behind > 0 && age > STALE_MS) {
@@ -349,9 +379,11 @@ class Replicator {
   }
 
   removeFiles(): void {
-    try {
-      unlinkSync(this.configPath)
-    } catch {}
+    for (const file of [this.configPath, this.logPath, `${this.logPath}.1`]) {
+      try {
+        unlinkSync(file)
+      } catch {}
+    }
   }
 }
 
@@ -449,6 +481,10 @@ function validateSpec(body: unknown): DatabaseSpec {
   })
   if (missing.length > 0) throw new Error(`missing: ${missing.join(', ')}`)
   generateConfig([spec])
+  // The service drops registrations whose file is gone, so one registered
+  // before its database exists would be dropped at the next check.
+  if (!existsSync(spec.dbPath))
+    throw new Error(`${spec.dbPath} does not exist; create the database before registering it`)
   return { ...spec, dbPath: canonicalDbPath(spec.dbPath) }
 }
 
@@ -528,7 +564,9 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       pid: process.pid,
       startedAt,
       home: paths.home,
-      ok: dbs.every((d) => d.state === 'running' && (d.health?.ok ?? true)),
+      // A database not yet checked has proved nothing; it shows as health
+      // null ("unchecked"), and only a passed check counts as ok.
+      ok: dbs.every((d) => d.state === 'running' && d.health?.ok === true),
       dbs,
     }
   }
@@ -541,6 +579,9 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     if (socketTimer) clearInterval(socketTimer)
     if (idleTimer) clearTimeout(idleTimer)
     server.close()
+    // A registration already in the queue finishes first, so the replicator
+    // it starts is stopped below rather than orphaned by the exit.
+    await serial(async () => {})
     await Promise.all([...replicators.values()].map((r) => r.stop()))
     try {
       unlinkSync(paths.socket)
@@ -553,20 +594,59 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     process.exit(0)
   }
 
+  // The decision runs in the queue, after every registration that arrived
+  // before it, so a registration racing the last unregister is never stopped
+  // by a shutdown it beat. Registrations queued after it are refused (503) and
+  // the client retries against the next service.
+  const shutdownIfIdle = (why: string) =>
+    serial(async () => {
+      if (replicators.size === 0) void shutdown(why)
+    })
+
   const armIdleExit = () => {
     if (replicators.size > 0 || idleTimer) return
     idleTimer = setTimeout(() => {
       idleTimer = null
-      if (replicators.size === 0) void shutdown('no databases registered')
+      void shutdownIfIdle('no databases registered')
     }, IDLE_EXIT_MS)
+  }
+
+  // A registered database whose file is gone (a deleted clone) is dropped, so
+  // it cannot keep the service alive and its status failing forever.
+  const pruneMissing = async () => {
+    let changed = false
+    for (const dbPath of Object.keys(registry)) {
+      if (existsSync(dbPath)) continue
+      const r = replicators.get(dbPath) ?? new Replicator(registry[dbPath], paths, bin, own)
+      await r.stop()
+      r.removeFiles()
+      replicators.delete(dbPath)
+      delete registry[dbPath]
+      changed = true
+      log(`dropped ${dbPath}: the database file no longer exists`)
+    }
+    if (changed) saveRegistry()
   }
 
   const register = (spec: DatabaseSpec) =>
     serial(async () => {
+      if (shuttingDown) return { status: 503, body: { error: 'the service is shutting down; retry' } }
       if (idleTimer) clearTimeout(idleTimer)
       idleTimer = null
+      await pruneMissing()
       const existing = replicators.get(spec.dbPath)
       if (!existing) {
+        // Two databases writing one replica overwrite each other's history,
+        // as when a copied clone registers its own database to the same path.
+        const sharing = Object.values(registry).find((s) => s.dbPath !== spec.dbPath && sameTarget(s, spec))
+        if (sharing) {
+          return {
+            status: 409,
+            body: {
+              error: `${describeReplica(spec)} already receives ${sharing.dbPath}; give ${spec.dbPath} its own replicaPath, or unregister ${sharing.dbPath} first`,
+            },
+          }
+        }
         registry[spec.dbPath] = spec
         saveRegistry()
         const r = new Replicator(spec, paths, bin, own)
@@ -613,6 +693,8 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       const url = new URL(req.url ?? '/', 'http://service')
       if (req.method === 'GET' && url.pathname === '/status') {
         if (url.searchParams.get('refresh')) {
+          await serial(pruneMissing)
+          armIdleExit()
           await Promise.all([...replicators.values()].map((r) => r.checkHealth()))
         }
         return send(res, 200, status())
@@ -626,7 +708,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
         if (typeof body.dbPath !== 'string') return send(res, 400, { error: 'dbPath is required' })
         const result = await unregister(canonicalDbPath(body.dbPath))
         send(res, result.status, result.body)
-        if (replicators.size === 0) void shutdown('last database unregistered')
+        void shutdownIfIdle('last database unregistered')
         return
       }
       if (req.method === 'POST' && url.pathname === '/stop') {
@@ -671,11 +753,12 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   // Clients can register while this runs, so it shares their queue, and a
   // database one of them already started is not started twice.
   await serial(async () => {
+    await pruneMissing()
     for (const spec of Object.values(registry)) {
       if (replicators.has(spec.dbPath)) continue
       const r = new Replicator(spec, paths, bin, own)
       replicators.set(spec.dbPath, r)
-      await r.start().catch((err) => log(`cannot start ${spec.dbPath}: ${firstLine(err)}`))
+      await r.start()
     }
   })
   armIdleExit()
@@ -695,7 +778,9 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     })
   }, SOCKET_CHECK_MS)
 
-  healthTimer = setInterval(() => {
+  healthTimer = setInterval(async () => {
+    await serial(pruneMissing).catch((err) => log(`cannot prune missing databases: ${firstLine(err)}`))
+    armIdleExit()
     for (const r of replicators.values()) {
       r.checkHealth().catch((err) => log(`health check failed for ${r.spec.dbPath}: ${firstLine(err)}`))
     }

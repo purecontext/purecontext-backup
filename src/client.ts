@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { type LitestreamOptions, missingCredentials, resolveEnv } from './config.js'
 import { loadLitestreamEnv } from './env.js'
 import { type ServicePaths, canonicalDbPath, compareVersions, packageVersion, servicePaths } from './paths.js'
-import { isServing, rpc } from './rpc.js'
+import { type RpcResponse, isServing, rpc } from './rpc.js'
 import type { DatabaseSpec, ServiceStatus } from './serve.js'
 
 export interface RegisterResult {
@@ -88,8 +88,20 @@ export async function registerDatabase(
     console.error(`[litestream] ${dbPath} not registered — ${reason}. Backups are OFF.`)
     return { status: 'skipped', dbPath, reason }
   }
-  await ensureService(paths)
-  const res = await rpc(paths.socket, 'POST', '/register', toSpec(opts, dbPath), 60_000)
+  // A service that is shutting down (its last database was just unregistered)
+  // refuses the registration or closes the connection; wait for it to exit
+  // and register with the next one.
+  let res: RpcResponse = { status: 0, body: undefined }
+  for (let attempt = 1; ; attempt++) {
+    await ensureService(paths)
+    try {
+      res = await rpc(paths.socket, 'POST', '/register', toSpec(opts, dbPath), 60_000)
+      if (res.status !== 503 || attempt === 3) break
+    } catch (err) {
+      if (attempt === 3) throw err
+    }
+    await waitFor(async () => !(await isServing(paths.socket)), 15_000)
+  }
   if (res.status !== 200) {
     throw new Error(`[litestream] ${res.body?.error ?? `register failed with HTTP ${res.status}`}`)
   }

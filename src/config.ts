@@ -25,17 +25,14 @@ export function resolveEnv(opts: LitestreamOptions) {
     endpoint: opts.endpoint ?? process.env.LITESTREAM_ENDPOINT,
     region: opts.region ?? process.env.LITESTREAM_REGION ?? 'auto',
     accessKeyId: opts.accessKeyId ?? process.env.LITESTREAM_ACCESS_KEY_ID,
-    secretAccessKey:
-      opts.secretAccessKey ?? process.env.LITESTREAM_SECRET_ACCESS_KEY,
+    secretAccessKey: opts.secretAccessKey ?? process.env.LITESTREAM_SECRET_ACCESS_KEY,
   }
 }
 
 export function missingCredentials(opts: LitestreamOptions): string[] {
   if (opts.replicaType === 'file') return []
   const env = resolveEnv(opts)
-  return (
-    ['bucket', 'endpoint', 'accessKeyId', 'secretAccessKey'] as const
-  ).filter((k) => !env[k])
+  return (['bucket', 'endpoint', 'accessKeyId', 'secretAccessKey'] as const).filter((k) => !env[k])
 }
 
 export function describeReplica(opts: LitestreamOptions): string {
@@ -58,8 +55,7 @@ export function describeReplica(opts: LitestreamOptions): string {
 function assertPositiveDuration(value: string, key: string): void {
   if (/^0+(s|m|h|ms|us|ns)?$/.test(value.trim())) {
     throw new Error(
-      `[litestream] ${key} must be greater than 0 (got "${value}"). ` +
-        'Litestream refuses to start with a zero duration, which would silently disable backups.',
+      `[litestream] ${key} must be greater than 0 (got "${value}"). Litestream refuses to start with a zero duration, which would silently disable backups.`,
     )
   }
 }

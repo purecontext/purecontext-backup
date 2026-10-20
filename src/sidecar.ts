@@ -1,13 +1,8 @@
-import { execFileSync, type ChildProcess, spawn } from 'node:child_process'
-import { writeFileSync, appendFileSync, unlinkSync, mkdirSync } from 'node:fs'
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
+import { appendFileSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import {
-  describeReplica,
-  generateConfig,
-  type LitestreamOptions,
-  missingCredentials,
-} from './config.js'
+import { type LitestreamOptions, describeReplica, generateConfig, missingCredentials } from './config.js'
 import { loadLitestreamEnv } from './env.js'
 
 export type { LitestreamOptions } from './config.js'
@@ -33,8 +28,8 @@ function killOrphans(configName: string): void {
   if (!pids) return
 
   for (const line of pids.split('\n')) {
-    const pid = parseInt(line.trim(), 10)
-    if (isNaN(pid)) continue
+    const pid = Number.parseInt(line.trim(), 10)
+    if (Number.isNaN(pid)) continue
 
     console.error(`[litestream] killing orphaned replicator (pid ${pid})`)
     try {
@@ -44,8 +39,8 @@ function killOrphans(configName: string): void {
 
   const deadline = Date.now() + 2000
   for (const line of pids.split('\n')) {
-    const pid = parseInt(line.trim(), 10)
-    if (isNaN(pid)) continue
+    const pid = Number.parseInt(line.trim(), 10)
+    if (Number.isNaN(pid)) continue
 
     while (Date.now() < deadline) {
       try {
@@ -66,7 +61,8 @@ function stopPreviousChild(): void {
   if (!state) return
 
   const { child } = state
-  if (child.exitCode !== null || child.killed) return
+  const pid = child.pid
+  if (pid === undefined || child.exitCode !== null || child.killed) return
 
   console.error(`[litestream] stopping previous replicator (pid ${child.pid})`)
   child.kill('SIGTERM')
@@ -74,7 +70,7 @@ function stopPreviousChild(): void {
   const deadline = Date.now() + 2000
   while (Date.now() < deadline) {
     try {
-      process.kill(child.pid!, 0)
+      process.kill(pid, 0)
     } catch {
       return
     }
@@ -99,9 +95,7 @@ export function startLitestreamAll(dbs: LitestreamOptions[]): boolean {
   const missing = missingCredentials(dbs[0])
 
   if (missing.length > 0) {
-    console.error(
-      `[litestream] not started — missing: ${missing.join(', ')}. Backups are OFF.`,
-    )
+    console.error(`[litestream] not started — missing: ${missing.join(', ')}. Backups are OFF.`)
     return false
   }
 
@@ -135,9 +129,7 @@ export function startLitestreamAll(dbs: LitestreamOptions[]): boolean {
 
   child.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'ENOENT') {
-      console.error(
-        '[litestream] binary not found. Install: brew install benbjohnson/litestream/litestream',
-      )
+      console.error('[litestream] binary not found. Install: brew install benbjohnson/litestream/litestream')
     } else {
       console.error('[litestream] failed to start:', err.message)
     }
@@ -154,9 +146,7 @@ export function startLitestreamAll(dbs: LitestreamOptions[]): boolean {
   process.on('SIGTERM', stopLitestream)
 
   for (const db of dbs) {
-    console.error(
-      `[litestream] replicating ${db.dbPath} → ${describeReplica(db)}`,
-    )
+    console.error(`[litestream] replicating ${db.dbPath} → ${describeReplica(db)}`)
   }
   return true
 }

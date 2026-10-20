@@ -11,9 +11,7 @@
       "import": "./dist/index.js"
     }
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "scripts": {
     "build": "tsc",
     "lint": "biome check .",
@@ -27,22 +25,14 @@
     "url": "https://github.com/purecontext/purecontext-litestream.git"
   },
   "license": "MIT",
-  "keywords": [
-    "litestream",
-    "sqlite",
-    "backup",
-    "replication",
-    "s3"
-  ],
+  "keywords": ["litestream", "sqlite", "backup", "replication", "s3"],
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "@biomejs/biome"
-    ]
+    "onlyBuiltDependencies": ["@biomejs/biome"]
   },
   "bin": {
     "purecontext-litestream": "dist/cli.js"

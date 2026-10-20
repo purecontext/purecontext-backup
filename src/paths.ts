@@ -15,14 +15,11 @@ export interface ServicePaths {
 }
 
 export function servicePaths(
-  home = process.env.PURECONTEXT_LITESTREAM_HOME ??
-    join(homedir(), '.config', 'purecontext', 'litestream'),
+  home = process.env.PURECONTEXT_LITESTREAM_HOME ?? join(homedir(), '.config', 'purecontext', 'litestream'),
 ): ServicePaths {
   const socket = join(home, 'serve.sock')
   if (Buffer.byteLength(socket) > MAX_SOCKET_PATH) {
-    throw new Error(
-      `[litestream] service socket path is too long for a unix socket: ${socket}`,
-    )
+    throw new Error(`[litestream] service socket path is too long for a unix socket: ${socket}`)
   }
   return {
     home,
@@ -46,9 +43,7 @@ export function canonicalDbPath(dbPath: string): string {
 }
 
 export function packageVersion(): string {
-  const pkg = JSON.parse(
-    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
-  )
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   return pkg.version
 }
 

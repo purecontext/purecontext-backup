@@ -336,7 +336,10 @@ class Replicator {
         if (changes.length === 0) {
           if (settled) problems.push('the replica has no change files, so only snapshots are landing')
         } else {
-          health.newestChangeAt = changes.map((f) => f.timestamp).sort().at(-1)
+          health.newestChangeAt = changes
+            .map((f) => f.timestamp)
+            .sort()
+            .at(-1)
           const behind = (health.localTxid ?? 0) - (health.remoteTxid ?? 0)
           const age = Date.now() - Date.parse(health.newestChangeAt ?? '')
           if (behind > 0 && age > STALE_MS) {
@@ -480,7 +483,8 @@ function validateSpec(body: unknown): DatabaseSpec {
   generateConfig([spec])
   // The service drops registrations whose file is gone, so one registered
   // before its database exists would be dropped at the next check.
-  if (!existsSync(spec.dbPath)) throw new Error(`${spec.dbPath} does not exist; create the database before registering it`)
+  if (!existsSync(spec.dbPath))
+    throw new Error(`${spec.dbPath} does not exist; create the database before registering it`)
   return { ...spec, dbPath: canonicalDbPath(spec.dbPath) }
 }
 

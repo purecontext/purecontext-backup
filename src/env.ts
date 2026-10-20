@@ -2,12 +2,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-const DEFAULT_ENV_PATH = join(
-  homedir(),
-  '.config',
-  'purecontext',
-  'litestream.env',
-)
+const DEFAULT_ENV_PATH = join(homedir(), '.config', 'purecontext', 'litestream.env')
 
 export function loadLitestreamEnv(envPath?: string): void {
   const path = envPath ?? DEFAULT_ENV_PATH

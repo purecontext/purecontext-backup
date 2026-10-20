@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -185,7 +194,9 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     const a = makeDb(home, 'a.db')
     const real = execFileSync('which', ['litestream'], { encoding: 'utf8' }).trim()
     const wrapper = join(home, 'litestream')
-    writeFileSync(wrapper, `#!/bin/sh\nif [ "$1" = replicate ]; then sleep 1; exit 1; fi\nexec ${real} "$@"\n`, { mode: 0o755 })
+    writeFileSync(wrapper, `#!/bin/sh\nif [ "$1" = replicate ]; then sleep 1; exit 1; fi\nexec ${real} "$@"\n`, {
+      mode: 0o755,
+    })
     process.env.LITESTREAM_BIN = wrapper
     try {
       await registerDatabase(opts(a), paths)
@@ -396,9 +407,10 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
       status.dbs.map((d) => d.dbPath.split('/').pop()),
       ['a.db'],
     )
-    assert.deepEqual(Object.keys(JSON.parse(readFileSync(paths.registry, 'utf8')).dbs).map((p) => p.split('/').pop()), [
-      'a.db',
-    ])
+    assert.deepEqual(
+      Object.keys(JSON.parse(readFileSync(paths.registry, 'utf8')).dbs).map((p) => p.split('/').pop()),
+      ['a.db'],
+    )
     a.db.close()
     b.db.close()
   })
@@ -410,9 +422,13 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     const flag = join(home, 'ps-fails')
     mkdirSync(stub)
     writeFileSync(flag, '')
-    writeFileSync(join(stub, 'ps'), `#!/bin/sh\nif [ -f '${flag}' ]; then echo 'ps: broken' >&2; exit 1; fi\nexec /bin/ps "$@"\n`, {
-      mode: 0o755,
-    })
+    writeFileSync(
+      join(stub, 'ps'),
+      `#!/bin/sh\nif [ -f '${flag}' ]; then echo 'ps: broken' >&2; exit 1; fi\nexec /bin/ps "$@"\n`,
+      {
+        mode: 0o755,
+      },
+    )
     const savedPath = process.env.PATH
     process.env.PATH = `${stub}:${savedPath}`
     try {
@@ -571,7 +587,10 @@ describe('sidecar config', () => {
 
   test('a file replica needs no credentials', () => {
     assert.deepEqual(config.missingCredentials({ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file' }), [])
-    assert.match(config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file' }]), /type: file\n\s+path: \/r/)
+    assert.match(
+      config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file' }]),
+      /type: file\n\s+path: \/r/,
+    )
   })
 
   test('an s3 replica without credentials is reported', () => {

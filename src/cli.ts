@@ -29,7 +29,9 @@ switch (command) {
       console.log(JSON.stringify({ running: true, ...status }, null, 2))
     } else {
       const count = status.dbs.length
-      console.log(`litestream service ${status.version} (pid ${status.pid}), ${count} database${count === 1 ? '' : 's'}`)
+      console.log(
+        `litestream service ${status.version} (pid ${status.pid}), ${count} database${count === 1 ? '' : 's'}`,
+      )
       for (const db of status.dbs) {
         const problems = db.state === 'running' ? (db.health?.problems ?? []) : [`replicator is ${db.state}`]
         const mark = problems.length > 0 ? 'FAIL' : db.health ? 'ok' : 'unchecked'

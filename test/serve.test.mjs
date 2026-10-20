@@ -126,6 +126,38 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     }
   })
 
+  test('the same file spelled in another case is the same database', async () => {
+    const { home, paths, opts } = make()
+    const a = makeDb(home, 'a.db')
+    await registerDatabase(opts(a), paths)
+    const shouted = { ...opts(a), dbPath: join(home, 'A.DB') }
+    assert.equal((await registerDatabase(shouted, paths)).status, 'unchanged')
+    assert.equal((await serviceStatus({}, paths)).dbs.length, 1)
+    a.db.close()
+  })
+
+  test('a replicator that keeps dying is reported even while it is up', async () => {
+    const { home, paths, opts } = make()
+    const a = makeDb(home, 'a.db')
+    const real = execFileSync('which', ['litestream'], { encoding: 'utf8' }).trim()
+    const wrapper = join(home, 'litestream')
+    writeFileSync(wrapper, `#!/bin/sh\nif [ "$1" = replicate ]; then sleep 1; exit 1; fi\nexec ${real} "$@"\n`, { mode: 0o755 })
+    process.env.LITESTREAM_BIN = wrapper
+    try {
+      await registerDatabase(opts(a), paths)
+    } finally {
+      delete process.env.LITESTREAM_BIN
+    }
+    const health = await until(async () => {
+      const d = (await serviceStatus({}, paths)).dbs[0]
+      if (d.restarts < 2 || d.state !== 'running') return null
+      return (await serviceStatus({ refresh: true }, paths)).dbs[0].health
+    }, 20_000)
+    assert.equal(health.ok, false)
+    assert.match(health.problems.join('\n'), /exited \d+ times/)
+    a.db.close()
+  })
+
   test('a duplicate is ignored, a new destination is refused, changed settings restart', async () => {
     const { home, paths, opts } = make()
     const a = makeDb(home, 'a.db')

@@ -35,12 +35,14 @@ export function servicePaths(
 }
 
 // One database must have one identity however it is spelled (/tmp versus
-// /private/tmp on macOS), or two registrations could start two replicators.
+// /private/tmp, or Jill versus jill on a case-insensitive disk), or two
+// registrations could start two replicators. Only the native realpath
+// returns the case stored on disk.
 export function canonicalDbPath(dbPath: string): string {
   const abs = resolve(dbPath)
-  if (existsSync(abs)) return realpathSync(abs)
+  if (existsSync(abs)) return realpathSync.native(abs)
   const dir = dirname(abs)
-  return existsSync(dir) ? join(realpathSync(dir), basename(abs)) : abs
+  return existsSync(dir) ? join(realpathSync.native(dir), basename(abs)) : abs
 }
 
 export function packageVersion(): string {

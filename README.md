@@ -55,7 +55,11 @@ await registerDatabase({
 
 Credentials resolve in the client, as below, and travel with the registration. The service's own environment is never consulted.
 
-The service lives in `~/.config/purecontext/litestream`, or in `PURECONTEXT_LITESTREAM_HOME` when that is set. That folder holds the socket, lock, registry, the service log `serve.log`, and per-database configs and logs in `dbs/`. Files holding credentials are created with mode 600.
+The service lives in `~/.config/purecontext/litestream`, or in `PURECONTEXT_LITESTREAM_HOME` when that is set. That folder holds the socket, lock, registry, the service log `serve.log`, and per-database configs and logs in `dbs/`. The folder is created with mode 700. `registry.json` and the configs in `dbs/` hold the S3 secret key in plain text, so they are created with mode 600, like the sidecar's config.
+
+### Moving from the sidecar
+
+When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on the database when it registers and again at each health check. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
 
 ### Command line
 

@@ -58,6 +58,7 @@ const STALE_MS = Number(process.env.PURECONTEXT_LITESTREAM_STALE_MS ?? 5 * 60_00
 const SETTLE_MS = 60_000
 const IDLE_EXIT_MS = 30_000
 const STABLE_RUN_MS = 5 * 60_000
+const CRASH_WINDOW_MS = 15 * 60_000
 const LOG_CAP_BYTES = 1_000_000
 const MAX_BODY_BYTES = 64 * 1024
 
@@ -129,7 +130,7 @@ async function foreignReplicators(dbPath: string, own: Set<number>): Promise<num
     }
     const config = configFromArgs(args)
     if (!config) continue
-    const listed = [...config.matchAll(/^\s*- path:\s*(\S.*?)\s*$/gm)].map((x) => x[1])
+    const listed = [...config.matchAll(/^\s*- path:\s*["']?(\S.*?)["']?\s*$/gm)].map((x) => x[1])
     if (listed.some((p) => isAbsolute(p) && canonicalDbPath(p) === dbPath)) found.push(pid)
   }
   return found
@@ -146,6 +147,7 @@ class Replicator {
   private readonly logPath: string
   private logBytes = 0
   private failures = 0
+  private exits: number[] = []
   private stopping = false
   private retry: NodeJS.Timeout | null = null
 
@@ -238,6 +240,7 @@ class Replicator {
     const ran = Date.now() - Date.parse(this.startedAt ?? '')
     this.failures = ran > STABLE_RUN_MS ? 1 : this.failures + 1
     this.restarts++
+    this.exits = [...this.exits.filter((t) => Date.now() - t < CRASH_WINDOW_MS), Date.now()]
     const delay = Math.min(60_000, 1000 * 2 ** (this.failures - 1))
     this.state = 'backoff'
     this.write(`replicator exited (code ${code}); restarting in ${delay / 1000}s`)
@@ -262,6 +265,13 @@ class Replicator {
   async checkHealth(): Promise<void> {
     const problems: string[] = []
     const health: Health = { ok: true, problems, checkedAt: new Date().toISOString() }
+    // Every restart resets the settle period, so a replicator that dies within
+    // a minute would never be judged on change files; count its exits instead.
+    const recentExits = this.exits.filter((t) => Date.now() - t < CRASH_WINDOW_MS).length
+    if (recentExits >= 2) {
+      const why = this.lastError ? `; last error: ${this.lastError.message}` : ''
+      problems.push(`replicator exited ${recentExits} times in ${CRASH_WINDOW_MS / 60_000} min${why}`)
+    }
     if (this.state !== 'running') {
       const why = this.lastError ? `: ${this.lastError.message}` : ''
       problems.push(`replicator is ${this.state}${why}`)
@@ -616,6 +626,14 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     }
   })
 
+  // Three racers can each believe they took the lock: a racer restoring a lock
+  // it moved by mistake can overwrite a third's. The file's contents are the
+  // one thing all of them agree on, so whoever it does not name backs out
+  // before touching the socket another may already serve.
+  if (readLockPid(paths.lock) !== process.pid) {
+    log('lost the lock to another service; exiting')
+    return
+  }
   try {
     unlinkSync(paths.socket)
   } catch {}
@@ -626,6 +644,11 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       resolve()
     })
   })
+  if (readLockPid(paths.lock) !== process.pid) {
+    log('lost the lock to another service; exiting')
+    server.close()
+    return
+  }
   log(`litestream service ${version} listening on ${paths.socket} (pid ${process.pid}, binary ${bin})`)
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'))

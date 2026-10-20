@@ -118,6 +118,10 @@ function configFromArgs(args: string): string | null {
   return null
 }
 
+// A replica keeps a year of change files; its listing passes the 1 MiB
+// execFile default within weeks of steady writes.
+const LISTING_BUFFER = 256 * 1024 * 1024
+
 async function foreignReplicators(dbPath: string, own: Set<number>): Promise<number[]> {
   const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,args='])
   const found: number[] = []
@@ -282,7 +286,10 @@ class Replicator {
       const { dbPath } = this.spec
       const config = ['-config', this.configPath]
       try {
-        const { stdout } = await execFileAsync(this.bin, ['status', '-json', ...config], { timeout: 30_000 })
+        const { stdout } = await execFileAsync(this.bin, ['status', '-json', ...config], {
+          timeout: 30_000,
+          maxBuffer: LISTING_BUFFER,
+        })
         const row = JSON.parse(stdout).find((r: { database: string }) => r.database === dbPath)
         if (row) health.localTxid = Number.parseInt(row.local_txid, 16)
       } catch (err) {
@@ -291,6 +298,7 @@ class Replicator {
       try {
         const { stdout } = await execFileAsync(this.bin, ['ltx', '-level', 'all', '-json', ...config, dbPath], {
           timeout: 60_000,
+          maxBuffer: LISTING_BUFFER,
         })
         const files: { level: number; max_txid: string; timestamp: string }[] = JSON.parse(stdout) ?? []
         const changes = files.filter((f) => f.level < 9)

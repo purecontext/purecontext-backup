@@ -147,6 +147,32 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     a.db.close()
   })
 
+  test('a replica listing larger than 1 MiB is still read', async () => {
+    const { home, paths, opts } = make()
+    const a = makeDb(home, 'a.db')
+    const real = execFileSync('which', ['litestream'], { encoding: 'utf8' }).trim()
+    const wrapper = join(home, 'litestream')
+    // Whitespace after the JSON keeps it valid while pushing it past 1 MiB.
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nif [ "$1" = ltx ]; then ${real} "$@"; head -c 2097152 /dev/zero | tr '\\0' ' '; exit 0; fi\nexec ${real} "$@"\n`,
+      { mode: 0o755 },
+    )
+    process.env.LITESTREAM_BIN = wrapper
+    try {
+      await registerDatabase(opts(a), paths)
+    } finally {
+      delete process.env.LITESTREAM_BIN
+    }
+    for (let i = 0; i < 10; i++) a.db.prepare('INSERT INTO t (v) VALUES (?)').run(`row ${i}`)
+    const health = await until(async () => {
+      const h = (await serviceStatus({ refresh: true }, paths)).dbs[0].health
+      return h?.remoteTxid !== undefined && h.remoteTxid === h.localTxid ? h : null
+    })
+    assert.deepEqual(health.problems, [])
+    a.db.close()
+  })
+
   test('a replicator that keeps dying is reported even while it is up', async () => {
     const { home, paths, opts } = make()
     const a = makeDb(home, 'a.db')

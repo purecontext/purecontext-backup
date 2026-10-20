@@ -107,6 +107,7 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     assert.equal(status.ok, true)
     assert.equal(status.dbs[0].state, 'running')
     assert.deepEqual(status.dbs[0].health.problems, [])
+    assert.match(readFileSync(status.dbs[0].configPath, 'utf8'), new RegExp(`- path: ${status.dbs[0].dbPath}`))
     assert.ok(alive(status.pid))
     a.db.close()
   })

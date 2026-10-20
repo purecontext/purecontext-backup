@@ -668,11 +668,16 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
   process.on('SIGINT', () => void shutdown('SIGINT'))
 
-  for (const spec of Object.values(registry)) {
-    const r = new Replicator(spec, paths, bin, own)
-    replicators.set(spec.dbPath, r)
-    await r.start().catch((err) => log(`cannot start ${spec.dbPath}: ${firstLine(err)}`))
-  }
+  // Clients can register while this runs, so it shares their queue, and a
+  // database one of them already started is not started twice.
+  await serial(async () => {
+    for (const spec of Object.values(registry)) {
+      if (replicators.has(spec.dbPath)) continue
+      const r = new Replicator(spec, paths, bin, own)
+      replicators.set(spec.dbPath, r)
+      await r.start().catch((err) => log(`cannot start ${spec.dbPath}: ${firstLine(err)}`))
+    }
+  })
   armIdleExit()
 
   // A racer that lost the lock late may already have unlinked our socket, and

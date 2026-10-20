@@ -301,6 +301,22 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     b.db.close()
   })
 
+  test('a registration that starts the service while it resumes gets one replicator', async () => {
+    const { home, paths, opts } = make()
+    const dbs = ['a.db', 'b.db', 'c.db', 'd.db', 'e.db'].map((n) => makeDb(home, n))
+    for (const db of dbs) await registerDatabase(opts(db), paths)
+    assert.equal(await stopService(paths), true)
+
+    // The last database resumes last, so this registration lands mid-resume.
+    await registerDatabase(opts(dbs.at(-1)), paths)
+    await sleep(3000)
+    const replicators = execFileSync('ps', ['-axo', 'args='], { encoding: 'utf8' })
+      .split('\n')
+      .filter((l) => /litestream\S*\s+replicate\b/.test(l) && l.includes(paths.dbDir) && l.includes('/e.db-'))
+    assert.equal(replicators.length, 1, replicators.join('\n'))
+    for (const db of dbs) db.db.close()
+  })
+
   test('unregistering the last database stops the service', async () => {
     const { home, paths, opts } = make()
     const a = makeDb(home, 'a.db')

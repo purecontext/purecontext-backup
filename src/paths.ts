@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -12,14 +13,19 @@ export interface ServicePaths {
   registry: string
   log: string
   dbDir: string
+  snapshotState: string
+  workDir: string
 }
 
+// The home keeps its litestream name from before the package was renamed:
+// services of both names must find one socket and one lock, or a machine
+// mid-update runs two services replicating the same databases.
 export function servicePaths(
   home = process.env.PURECONTEXT_LITESTREAM_HOME ?? join(homedir(), '.config', 'purecontext', 'litestream'),
 ): ServicePaths {
   const socket = join(home, 'serve.sock')
   if (Buffer.byteLength(socket) > MAX_SOCKET_PATH) {
-    throw new Error(`[litestream] service socket path is too long for a unix socket: ${socket}`)
+    throw new Error(`[backup] service socket path is too long for a unix socket: ${socket}`)
   }
   return {
     home,
@@ -28,7 +34,14 @@ export function servicePaths(
     registry: join(home, 'registry.json'),
     log: join(home, 'serve.log'),
     dbDir: join(home, 'dbs'),
+    snapshotState: join(home, 'snapshots.json'),
+    workDir: join(home, 'work'),
   }
+}
+
+/** A database's short, stable name: its file name plus a hash of its full path. */
+export function databaseId(dbPath: string): string {
+  return `${basename(dbPath)}-${createHash('sha256').update(dbPath).digest('hex').slice(0, 10)}`
 }
 
 // One database must have one identity however it is spelled (/tmp versus

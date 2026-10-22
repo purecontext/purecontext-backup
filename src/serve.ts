@@ -1,5 +1,4 @@
 import { type ChildProcess, execFile, execFileSync, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import {
   appendFileSync,
   closeSync,
@@ -14,11 +13,25 @@ import {
   writeSync,
 } from 'node:fs'
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http'
-import { basename, delimiter, isAbsolute, join } from 'node:path'
+import { delimiter, isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
 import { type LitestreamOptions, describeReplica, generateConfig, missingCredentials } from './config.js'
-import { type ServicePaths, canonicalDbPath, packageVersion, servicePaths } from './paths.js'
+import { type ServicePaths, canonicalDbPath, databaseId, packageVersion, servicePaths } from './paths.js'
 import { isServing } from './rpc.js'
+import {
+  type Keep,
+  type RestoreCheck,
+  type SnapshotConfig,
+  type SnapshotStatus,
+  checkRestore,
+  clearWorkDir,
+  listSnapshots,
+  loadSnapshotConfig,
+  snapshotDue,
+  snapshotFolder,
+  snapshotProblems,
+  takeSnapshot,
+} from './snapshot.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -44,7 +57,14 @@ export interface DatabaseStatus {
   health: Health | null
   // For litestream commands run by hand, such as restore -config.
   configPath: string
+  /** Null while snapshots are off for this machine. */
+  snapshot: SnapshotStatus | null
 }
+
+export type SnapshotsSummary =
+  | { state: 'off' }
+  | { state: 'on'; destination: string; keep: Keep; restoreCheckDays: number }
+  | { state: 'invalid'; error: string }
 
 export interface ServiceStatus {
   version: string
@@ -52,18 +72,24 @@ export interface ServiceStatus {
   startedAt: string
   home: string
   ok: boolean
+  snapshots: SnapshotsSummary
   dbs: DatabaseStatus[]
 }
 
 const HEALTH_INTERVAL_MS = Number(process.env.PURECONTEXT_LITESTREAM_HEALTH_MS ?? 5 * 60_000)
 const STALE_MS = Number(process.env.PURECONTEXT_LITESTREAM_STALE_MS ?? 5 * 60_000)
-const SETTLE_MS = 60_000
+const SETTLE_MS = Number(process.env.PURECONTEXT_LITESTREAM_SETTLE_MS ?? 60_000)
 const IDLE_EXIT_MS = 30_000
 const STABLE_RUN_MS = 5 * 60_000
 const CRASH_WINDOW_MS = 15 * 60_000
 const SOCKET_CHECK_MS = 5_000
 const LOG_CAP_BYTES = 1_000_000
 const MAX_BODY_BYTES = 64 * 1024
+const SNAPSHOT_PASS_MS = Number(process.env.PURECONTEXT_BACKUP_SNAPSHOT_MS ?? 5 * 60_000)
+// Startup resumes every replicator at once; the first pass waits for that.
+const SNAPSHOT_FIRST_MS = Number(process.env.PURECONTEXT_BACKUP_SNAPSHOT_FIRST_MS ?? 2 * 60_000)
+const DAY_MS = 24 * 60 * 60_000
+const RESTORE_RETRY_MS = 60 * 60_000
 
 const log = (msg: string) => console.error(`[${new Date().toISOString()}] ${msg}`)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -150,6 +176,8 @@ class Replicator {
   restarts = 0
   lastError: DatabaseStatus['lastError'] = null
   health: Health | null = null
+  snapshotError: SnapshotStatus['lastError'] = null
+  restoreCheck: RestoreCheck | null = null
   readonly configPath: string
   private readonly logPath: string
   private logBytes = 0
@@ -164,8 +192,7 @@ class Replicator {
     private readonly bin: string,
     private readonly own: () => Set<number>,
   ) {
-    const hash = createHash('sha256').update(spec.dbPath).digest('hex').slice(0, 10)
-    const id = `${basename(spec.dbPath)}-${hash}`
+    const id = databaseId(spec.dbPath)
     this.configPath = join(paths.dbDir, `${id}.yml`)
     this.logPath = join(paths.dbDir, `${id}.log`)
     try {
@@ -173,7 +200,7 @@ class Replicator {
     } catch {}
   }
 
-  private write(line: string): void {
+  write(line: string): void {
     const entry = `[${new Date().toISOString()}] ${line}\n`
     if (this.logBytes > LOG_CAP_BYTES) {
       try {
@@ -364,7 +391,29 @@ class Replicator {
     this.health = health
   }
 
-  describe(): DatabaseStatus {
+  restoreDue(days: number): boolean {
+    if (days <= 0 || this.state !== 'running') return false
+    // A replicator that just started has not finished its first sync.
+    if (Date.now() - Date.parse(this.startedAt ?? '') < SETTLE_MS) return false
+    if (!this.restoreCheck) return true
+    const wait = this.restoreCheck.ok ? days * DAY_MS : RESTORE_RETRY_MS
+    return Date.now() - Date.parse(this.restoreCheck.at) >= wait
+  }
+
+  describe(config: SnapshotConfig, serviceStartMs: number): DatabaseStatus {
+    let snapshot: SnapshotStatus | null = null
+    if (config.state === 'on') {
+      const folder = snapshotFolder(config.settings.destination, this.spec.dbPath)
+      const files = listSnapshots(folder)
+      snapshot = {
+        folder,
+        newest: files.at(-1) ?? null,
+        kept: files.length,
+        lastError: this.snapshotError,
+        restoreCheck: this.restoreCheck,
+        problems: snapshotProblems(folder, this.snapshotError, this.restoreCheck, serviceStartMs),
+      }
+    }
     return {
       dbPath: this.spec.dbPath,
       replica: describeReplica(this.spec),
@@ -375,6 +424,7 @@ class Replicator {
       lastError: this.lastError,
       health: this.health,
       configPath: this.configPath,
+      snapshot,
     }
   }
 
@@ -400,7 +450,7 @@ function isServiceProcess(pid: number): boolean {
   if (!alive(pid)) return false
   try {
     const args = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' })
-    return /litestream/.test(args) && /\bserve\b/.test(args)
+    return /purecontext-backup|@purecontext\/backup|litestream/.test(args) && /\bserve\b/.test(args)
   } catch {
     return true
   }
@@ -555,10 +605,30 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   let idleTimer: NodeJS.Timeout | null = null
   let healthTimer: NodeJS.Timeout | null = null
   let socketTimer: NodeJS.Timeout | null = null
+  let snapshotTimer: NodeJS.Timeout | null = null
   let shuttingDown = false
+  let snapshotting = false
+
+  // Restore checks run days apart, so their results outlive a restart.
+  let restoreChecks: Record<string, RestoreCheck> = {}
+  try {
+    restoreChecks = JSON.parse(readFileSync(paths.snapshotState, 'utf8')).restoreChecks ?? {}
+  } catch {}
+  const saveRestoreChecks = () => {
+    const tmp = `${paths.snapshotState}.${process.pid}.tmp`
+    writeFileSync(tmp, `${JSON.stringify({ version: 1, restoreChecks }, null, 2)}\n`, { mode: 0o600 })
+    renameSync(tmp, paths.snapshotState)
+  }
+  const replicatorFor = (spec: DatabaseSpec) => {
+    const r = new Replicator(spec, paths, bin, own)
+    r.restoreCheck = restoreChecks[spec.dbPath] ?? null
+    return r
+  }
 
   const status = (): ServiceStatus => {
-    const dbs = [...replicators.values()].map((r) => r.describe())
+    const config = loadSnapshotConfig()
+    const dbs = [...replicators.values()].map((r) => r.describe(config, Date.parse(startedAt)))
+    const snapshots: SnapshotsSummary = config.state === 'on' ? { state: 'on', ...config.settings } : config
     return {
       version,
       pid: process.pid,
@@ -566,8 +636,45 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       home: paths.home,
       // A database not yet checked has proved nothing; it shows as health
       // null ("unchecked"), and only a passed check counts as ok.
-      ok: dbs.every((d) => d.state === 'running' && d.health?.ok === true),
+      ok:
+        snapshots.state !== 'invalid' &&
+        dbs.every((d) => d.state === 'running' && d.health?.ok === true && (d.snapshot?.problems.length ?? 0) === 0),
+      snapshots,
       dbs,
+    }
+  }
+
+  // One database at a time, outside the registration queue: a copy takes
+  // seconds, and registrations must not wait on it.
+  const snapshotPass = async () => {
+    if (snapshotting || shuttingDown) return
+    const config = loadSnapshotConfig()
+    if (config.state !== 'on') return
+    snapshotting = true
+    try {
+      for (const r of [...replicators.values()]) {
+        if (shuttingDown) break
+        const { dbPath } = r.spec
+        if (snapshotDue(snapshotFolder(config.settings.destination, dbPath))) {
+          try {
+            const file = await takeSnapshot(dbPath, config.settings, paths.workDir)
+            r.snapshotError = null
+            r.write(`snapshot saved: ${file.path} (${file.bytes} bytes)`)
+          } catch (err) {
+            r.snapshotError = { at: new Date().toISOString(), message: firstLine(err) }
+            r.write(`snapshot failed: ${firstLine(err)}`)
+            log(`snapshot of ${dbPath} failed: ${firstLine(err)}`)
+          }
+        }
+        if (!shuttingDown && r.restoreDue(config.settings.restoreCheckDays)) {
+          r.restoreCheck = await checkRestore(bin, r.configPath, dbPath, paths.workDir)
+          restoreChecks[dbPath] = r.restoreCheck
+          saveRestoreChecks()
+          r.write(`restore check ${r.restoreCheck.ok ? 'passed' : 'failed'}: ${r.restoreCheck.detail}`)
+        }
+      }
+    } finally {
+      snapshotting = false
     }
   }
 
@@ -577,6 +684,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     log(`shutting down: ${why}`)
     if (healthTimer) clearInterval(healthTimer)
     if (socketTimer) clearInterval(socketTimer)
+    if (snapshotTimer) clearInterval(snapshotTimer)
     if (idleTimer) clearTimeout(idleTimer)
     server.close()
     // A registration already in the queue finishes first, so the replicator
@@ -617,7 +725,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     let changed = false
     for (const dbPath of Object.keys(registry)) {
       if (existsSync(dbPath)) continue
-      const r = replicators.get(dbPath) ?? new Replicator(registry[dbPath], paths, bin, own)
+      const r = replicators.get(dbPath) ?? replicatorFor(registry[dbPath])
       await r.stop()
       r.removeFiles()
       replicators.delete(dbPath)
@@ -649,7 +757,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
         }
         registry[spec.dbPath] = spec
         saveRegistry()
-        const r = new Replicator(spec, paths, bin, own)
+        const r = replicatorFor(spec)
         replicators.set(spec.dbPath, r)
         await r.start()
         log(`registered ${spec.dbPath} → ${describeReplica(spec)}`)
@@ -745,7 +853,8 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     server.close()
     return
   }
-  log(`litestream service ${version} listening on ${paths.socket} (pid ${process.pid}, binary ${bin})`)
+  clearWorkDir(paths.workDir)
+  log(`backup service ${version} listening on ${paths.socket} (pid ${process.pid}, binary ${bin})`)
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'))
   process.on('SIGINT', () => void shutdown('SIGINT'))
@@ -756,7 +865,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     await pruneMissing()
     for (const spec of Object.values(registry)) {
       if (replicators.has(spec.dbPath)) continue
-      const r = new Replicator(spec, paths, bin, own)
+      const r = replicatorFor(spec)
       replicators.set(spec.dbPath, r)
       await r.start()
     }
@@ -777,6 +886,13 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       server.listen(paths.socket, () => server.off('error', failed))
     })
   }, SOCKET_CHECK_MS)
+
+  const runSnapshots = () => snapshotPass().catch((err) => log(`snapshot pass failed: ${firstLine(err)}`))
+  setTimeout(() => {
+    if (shuttingDown) return
+    void runSnapshots()
+    snapshotTimer = setInterval(runSnapshots, SNAPSHOT_PASS_MS)
+  }, SNAPSHOT_FIRST_MS).unref()
 
   healthTimer = setInterval(async () => {
     await serial(pruneMissing).catch((err) => log(`cannot prune missing databases: ${firstLine(err)}`))

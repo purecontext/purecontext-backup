@@ -32,7 +32,11 @@ function spawnService(paths: ServicePaths): void {
     if (statSync(paths.log).size > 1_000_000) renameSync(paths.log, `${paths.log}.1`)
   } catch {}
   const out = openSync(paths.log, 'a', 0o600)
-  const child = spawn(process.execPath, [fileURLToPath(new URL('./cli.js', import.meta.url)), 'serve'], {
+  // A client that only knows the old package name decides whether the lock
+  // holder is alive by finding "litestream" and "serve" in its command; the
+  // marker carries the name whatever the home is called. The service ignores it.
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url))
+  const child = spawn(process.execPath, [cli, 'serve', '--home', paths.home, '--compat-litestream'], {
     detached: true,
     stdio: ['ignore', out, out],
     env: { ...process.env, PURECONTEXT_LITESTREAM_HOME: paths.home },
@@ -60,13 +64,13 @@ export async function ensureService(paths: ServicePaths = servicePaths()): Promi
   const running = await serviceStatus({}, paths)
   if (running) {
     if (compareVersions(running.version, packageVersion()) >= 0) return
-    console.error(`[litestream] replacing service ${running.version} with ${packageVersion()}`)
+    console.error(`[backup] replacing service ${running.version} with ${packageVersion()}`)
     await rpc(paths.socket, 'POST', '/stop', {}, 30_000).catch(() => {})
     await waitFor(async () => !(await isServing(paths.socket)), 15_000)
   }
   spawnService(paths)
   if (!(await waitFor(() => isServing(paths.socket), 10_000))) {
-    throw new Error(`[litestream] the service did not start; see ${paths.log}`)
+    throw new Error(`[backup] the service did not start; see ${paths.log}`)
   }
 }
 
@@ -85,7 +89,7 @@ export async function registerDatabase(
   const missing = missingCredentials(opts)
   if (missing.length > 0) {
     const reason = `missing: ${missing.join(', ')}`
-    console.error(`[litestream] ${dbPath} not registered — ${reason}. Backups are OFF.`)
+    console.error(`[backup] ${dbPath} not registered — ${reason}. Backups are OFF.`)
     return { status: 'skipped', dbPath, reason }
   }
   // A service that is shutting down (its last database was just unregistered)
@@ -103,7 +107,7 @@ export async function registerDatabase(
     await waitFor(async () => !(await isServing(paths.socket)), 15_000)
   }
   if (res.status !== 200) {
-    throw new Error(`[litestream] ${res.body?.error ?? `register failed with HTTP ${res.status}`}`)
+    throw new Error(`[backup] ${res.body?.error ?? `register failed with HTTP ${res.status}`}`)
   }
   return res.body
 }
@@ -115,7 +119,7 @@ export async function unregisterDatabase(
   const canonical = canonicalDbPath(dbPath)
   if (!(await isServing(paths.socket))) return { status: 'not-running', dbPath: canonical }
   const res = await rpc(paths.socket, 'POST', '/unregister', { dbPath: canonical }, 30_000)
-  if (res.status !== 200) throw new Error(`[litestream] ${res.body?.error ?? `HTTP ${res.status}`}`)
+  if (res.status !== 200) throw new Error(`[backup] ${res.body?.error ?? `HTTP ${res.status}`}`)
   return res.body
 }
 

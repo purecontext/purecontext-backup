@@ -1,13 +1,15 @@
-# @purecontext/litestream
+# @purecontext/backup
 
-Continuous SQLite backup via [Litestream](https://litestream.io). A small background service runs one Litestream replicator per database and replicates it to S3-compatible storage, or a local directory, with point-in-time recovery.
+SQLite backup in two independent layers. A small background service runs one [Litestream](https://litestream.io) replicator per database, replicating it to S3-compatible storage or a local directory with point-in-time recovery. It can also take a verified snapshot of every database each day into a folder you choose, such as a synced Google Drive, rotated by day, week and month, and regularly restore the replica to prove it works.
+
+This package was `@purecontext/litestream` through 0.3.4. The API is unchanged; only the name and the snapshots are new.
 
 Designed for Node.js servers and MCP servers that use SQLite. Registration is skipped with a warning when credentials are missing. Your app runs fine either way.
 
 ## Install
 
 ```bash
-npm install @purecontext/litestream
+npm install @purecontext/backup
 ```
 
 Litestream must be installed separately:
@@ -19,7 +21,7 @@ brew install benbjohnson/litestream/litestream
 ## Quick Start
 
 ```ts
-import { registerDatabase } from '@purecontext/litestream'
+import { registerDatabase } from '@purecontext/backup'
 
 await registerDatabase({
   dbPath: './data/my-app.db',
@@ -43,16 +45,16 @@ Create the database before registering it; a path that does not exist is refused
 
 Credentials resolve in the client, as below, and travel with the registration. The service's own environment is never consulted.
 
-The service lives in `~/.config/purecontext/litestream`, or in `PURECONTEXT_LITESTREAM_HOME` when that is set. That folder holds the socket, lock, registry, the service log `serve.log`, and per-database configs and logs in `dbs/`. Unregistering or dropping a database removes its config and logs. The folder is created with mode 700. `registry.json` and the configs in `dbs/` hold the S3 secret key in plain text, so they are created with mode 600, like the sidecar's config.
+The service lives in `~/.config/purecontext/litestream`, or in `PURECONTEXT_LITESTREAM_HOME` when that is set. That folder holds the socket, lock, registry, the service log `serve.log`, and per-database configs and logs in `dbs/`. Unregistering or dropping a database removes its config and logs. The folder is created with mode 700. `registry.json` and the configs in `dbs/` hold the S3 secret key in plain text, so they are created with mode 600, like the sidecar's config. The folder keeps its `litestream` name from before the rename, so a service of either name finds the same socket and lock, and a machine mid-update never runs two.
 
 ### Command line
 
 ```bash
-purecontext-litestream status        # health of every registered database; exit 1 on a problem or an unchecked database, 2 when not running
-purecontext-litestream status --json # the same, for other tools
-purecontext-litestream unregister ./data/my-app.db
-purecontext-litestream stop          # registrations are kept
-purecontext-litestream serve         # run in the foreground
+purecontext-backup status        # health of every registered database; exit 1 on a problem or an unchecked database, 2 when not running
+purecontext-backup status --json # the same, for other tools
+purecontext-backup unregister ./data/my-app.db
+purecontext-backup stop          # registrations are kept
+purecontext-backup serve         # run in the foreground
 ```
 
 `serviceStatus()`, `unregisterDatabase()` and `stopService()` do the same from code.
@@ -64,6 +66,38 @@ Set `replicaType: 'file'` and an absolute `replicaPath` to replicate to a local 
 ### Moving from the sidecar
 
 When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on the database when it registers and again at each health check. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
+
+## Snapshots
+
+Replication copies every change, including a damaged one, to one storage account under one set of credentials. Snapshots are the second layer: whole copies of each registered database, in a place with its own credentials, kept long enough to outlast a mistake.
+
+Turn them on in `~/.config/purecontext/backup.json`, or the file `PURECONTEXT_BACKUP_CONFIG` names. The service rereads it on every pass, so an edit needs no restart.
+
+```json
+{
+  "snapshots": {
+    "destination": "/Users/me/Library/CloudStorage/GoogleDrive-me@example.com/My Drive/Backups/purecontext",
+    "keep": { "daily": 7, "weekly": 4, "monthly": 6 },
+    "restoreCheckDays": 7
+  }
+}
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `destination` | | Absolute path of the folder snapshots go to. A folder a sync client uploads, such as Google Drive or iCloud Drive, takes them off the machine. |
+| `keep.daily` | 7 | Keep the newest snapshot of each of this many recent days. |
+| `keep.weekly` | 4 | Likewise for weeks, starting Monday. |
+| `keep.monthly` | 6 | Likewise for months. |
+| `restoreCheckDays` | 7 | Days between restore checks of the replica. 0 turns them off. |
+
+The tiers share files: one snapshot can be this month's, this week's and today's at once. With the defaults, at most 17 are kept per database. A tier set to 0 keeps nothing for itself, and at least one tier must keep something.
+
+- **Once a day.** Every five minutes the service checks whether each database has a snapshot from today, in local time, and takes one if not. A machine asleep at night catches up when it wakes.
+- **Verified before it lands.** The copy is made with SQLite's backup API, which is safe while the database is in use, then switched to a single-file journal and run through `PRAGMA integrity_check`. Only a copy that passes is compressed and moved into the destination, under a temporary name first, so a synced folder never uploads a partial or damaged file and a bad copy never replaces a good one.
+- **Layout.** `<destination>/<host>/<database file>-<hash>/<database file>-<hash>-<UTC time>.db.gz`, with a `source.json` naming the database's path. Restore one with `gunzip -c <file> > restored.db`.
+- **Restore checks.** Every `restoreCheckDays`, the service restores the replica into a scratch file, checks its integrity, and compares its row count with the live database. Fewer than 90% of the live rows, a failed restore, or a damaged result is a problem. A failed check retries after an hour. Results are kept in `snapshots.json` in the service folder.
+- **Health from the destination.** Status reads the destination itself. A newest snapshot more than 36 hours old, a failed snapshot or a failed restore check is a problem, and makes the service not `ok`. So does an invalid config file. Snapshots need `node:sqlite`, in Node 22.16 or later.
 
 ## Credentials
 
@@ -108,7 +142,7 @@ Environment variables are loaded non-destructively. If a variable is already set
 ## Restore
 
 ```ts
-import { restoreDatabase } from '@purecontext/litestream'
+import { restoreDatabase } from '@purecontext/backup'
 
 await restoreDatabase({
   dbPath: './data/my-app.db',
@@ -127,7 +161,7 @@ For projects where backup is nice-to-have, use dynamic import and list the packa
 ```ts
 async function maybeStartBackup(dbPath: string) {
   try {
-    const { registerDatabase } = await import('@purecontext/litestream')
+    const { registerDatabase } = await import('@purecontext/backup')
     await registerDatabase({ dbPath, replicaPath: 'my-app/my-app.db' })
   } catch {
     // package not installed, or the service could not start
@@ -140,7 +174,7 @@ async function maybeStartBackup(dbPath: string) {
 Before the service, the package ran Litestream as a child of the calling process. That API is still exported for projects on 0.2.x, but new code should use `registerDatabase`. The sidecar ties a replicator to the process that started it: when several processes use one database, the last to start kills the others' replicator, and the database goes unreplicated once that process exits.
 
 ```ts
-import { startLitestream, stopLitestream } from '@purecontext/litestream'
+import { startLitestream, stopLitestream } from '@purecontext/backup'
 
 startLitestream({
   name: 'my-app',
@@ -174,7 +208,7 @@ The config file contains S3 credentials (resolved from env vars or the credentia
 Use `startLitestreamAll` to replicate multiple databases with a single Litestream process:
 
 ```ts
-import { startLitestreamAll } from '@purecontext/litestream'
+import { startLitestreamAll } from '@purecontext/backup'
 
 startLitestreamAll([
   {

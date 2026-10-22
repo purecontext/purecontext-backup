@@ -54,6 +54,12 @@ function makeDb(path, rows = 200) {
   return db
 }
 
+const mkdest = (d) => {
+  const p = join(d, 'dest')
+  mkdirSync(p, { recursive: true })
+  return p
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 async function until(check, timeoutMs = 30_000) {
   const deadline = Date.now() + timeoutMs
@@ -169,7 +175,7 @@ describe('snapshots', () => {
     const d = dir()
     const dbPath = join(d, 'live.db')
     const live = makeDb(dbPath)
-    const destination = join(d, 'dest')
+    const destination = mkdest(d)
     const settings = { destination, keep: { daily: 2, weekly: 0, monthly: 0 }, restoreCheckDays: 7 }
     const folder = snapshotFolder(destination, dbPath)
 
@@ -205,7 +211,7 @@ describe('snapshots', () => {
     const fd = openSync(dbPath, 'r+')
     writeSync(fd, Buffer.alloc(4096, 0xab), 0, 4096, 4096 * 3)
     closeSync(fd)
-    const destination = join(d, 'dest')
+    const destination = mkdest(d)
     const settings = { destination, keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
     await assert.rejects(takeSnapshot(dbPath, settings, join(d, 'work')))
     assert.deepEqual(listSnapshots(snapshotFolder(destination, dbPath)), [])
@@ -215,7 +221,7 @@ describe('snapshots', () => {
     const d = dir()
     const dbPath = join(d, 'live.db')
     makeDb(dbPath).close()
-    const settings = { destination: join(d, 'dest'), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
+    const settings = { destination: mkdest(d), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
     const folder = snapshotFolder(settings.destination, dbPath)
     const now = local(2026, 10, 21, 15)
     assert.equal(snapshotDue(folder, now), true)
@@ -225,11 +231,30 @@ describe('snapshots', () => {
     assert.equal(snapshotDue(folder, now), false)
   })
 
+  test('a file stamped in the future counts as today, so passes do not copy again', async () => {
+    const d = dir()
+    const dbPath = join(d, 'live.db')
+    makeDb(dbPath).close()
+    const settings = { destination: mkdest(d), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
+    await takeSnapshot(dbPath, settings, join(d, 'work'), local(2026, 11, 3, 9))
+    assert.equal(snapshotDue(snapshotFolder(settings.destination, dbPath), local(2026, 10, 21, 15)), false)
+  })
+
+  test('a missing destination is refused, and nothing is created under it', async () => {
+    const d = dir()
+    const dbPath = join(d, 'live.db')
+    makeDb(dbPath).close()
+    const destination = join(d, 'Drive not mounted', 'Backups')
+    const settings = { destination, keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
+    await assert.rejects(takeSnapshot(dbPath, settings, join(d, 'work')), /does not exist; is the sync client running/)
+    assert.equal(existsSync(join(d, 'Drive not mounted')), false)
+  })
+
   test('problems are judged from the destination', async () => {
     const d = dir()
     const dbPath = join(d, 'live.db')
     makeDb(dbPath).close()
-    const settings = { destination: join(d, 'dest'), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
+    const settings = { destination: mkdest(d), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
     const folder = snapshotFolder(settings.destination, dbPath)
     const now = Date.parse('2026-10-21T12:00:00Z')
     assert.deepEqual(snapshotProblems(folder, null, null, now - 1000, now), [], 'a new service has had no chance yet')
@@ -266,9 +291,13 @@ describe('service snapshots', { skip: !hasBinary && 'litestream binary not insta
     const paths = servicePaths(home)
     const dbPath = join(d, 'live.db')
     const live = makeDb(dbPath)
-    const destination = join(d, 'dest')
+    const destination = mkdest(d)
     const config = join(d, 'backup.json')
     writeFileSync(config, JSON.stringify({ snapshots: { destination, keep: { daily: 3 }, restoreCheckDays: 7 } }))
+
+    // A run killed mid-copy leaves a whole database copy in the work folder.
+    mkdirSync(paths.workDir, { recursive: true })
+    writeFileSync(join(paths.workDir, 'live.db-0000000000-20261020T000000Z.db.12345'), 'left by a killed run')
 
     const env = {
       PURECONTEXT_BACKUP_CONFIG: config,
@@ -296,6 +325,16 @@ describe('service snapshots', { skip: !hasBinary && 'litestream binary not insta
     assert.match(snap.restoreCheck.detail, /restored 200 rows; the live database has 200/)
     assert.deepEqual(snap.problems, [])
     assert.ok(existsSync(paths.snapshotState), 'the restore result outlives a restart')
+    assert.deepEqual(readdirSync(paths.workDir), [], 'the service clears what a killed run left')
+
+    // 0.3.x decides a lock holder is alive with exactly this test. Installed,
+    // the script path says @purecontext/backup; this checkout's folder says
+    // litestream, so only what follows the script path is tested, and this
+    // home's name carries no "litestream" of its own.
+    assert.doesNotMatch(home, /litestream/)
+    const ps = execFileSync('ps', ['-o', 'args=', '-p', String(status.pid)], { encoding: 'utf8' })
+    const args = ps.slice(ps.indexOf('cli.js '))
+    assert.ok(/litestream/.test(args) && /\bserve\b/.test(args), args)
     live.close()
   })
 })

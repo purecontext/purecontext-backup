@@ -32,11 +32,11 @@ function spawnService(paths: ServicePaths): void {
     if (statSync(paths.log).size > 1_000_000) renameSync(paths.log, `${paths.log}.1`)
   } catch {}
   const out = openSync(paths.log, 'a', 0o600)
-  // The home on the command line marks the process as the service for a
-  // client that only knows the old package name: its check for a live lock
-  // holder looks for "litestream" in the command, and the home carries it.
+  // A client that only knows the old package name decides whether the lock
+  // holder is alive by finding "litestream" and "serve" in its command; the
+  // marker carries the name whatever the home is called. The service ignores it.
   const cli = fileURLToPath(new URL('./cli.js', import.meta.url))
-  const child = spawn(process.execPath, [cli, 'serve', '--home', paths.home], {
+  const child = spawn(process.execPath, [cli, 'serve', '--home', paths.home, '--compat-litestream'], {
     detached: true,
     stdio: ['ignore', out, out],
     env: { ...process.env, PURECONTEXT_LITESTREAM_HOME: paths.home },

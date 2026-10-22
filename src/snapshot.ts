@@ -256,6 +256,16 @@ export async function takeSnapshot(
   now = new Date(),
 ): Promise<SnapshotFile> {
   const { DatabaseSync, backup } = await sqlite()
+  // A missing destination is usually a sync client that is not running or not
+  // signed in. Creating it would put snapshots on local disk under the synced
+  // path, where they look backed up and never leave the machine.
+  let isDir = false
+  try {
+    isDir = statSync(settings.destination).isDirectory()
+  } catch {}
+  if (!isDir) {
+    throw new Error(`destination ${settings.destination} does not exist; is the sync client running?`)
+  }
   const folder = snapshotFolder(settings.destination, dbPath)
   mkdirSync(folder, { recursive: true })
   mkdirSync(workDir, { recursive: true, mode: 0o700 })
@@ -286,6 +296,10 @@ export async function takeSnapshot(
     // ever sees a whole file under its final name.
     await pipeline(createReadStream(work), createGzip(), createWriteStream(`${work}.gz`))
     copyFileSync(`${work}.gz`, partial)
+    // A sync layer can drop a short write without reporting an error.
+    const expected = statSync(`${work}.gz`).size
+    const landed = statSync(partial).size
+    if (landed !== expected) throw new Error(`copy into the destination is short: ${landed} of ${expected} bytes`)
     renameSync(partial, target)
   } finally {
     for (const suffix of ['', '-wal', '-shm', '-journal', '.gz']) removeQuietly(`${work}${suffix}`)
@@ -306,7 +320,22 @@ export async function takeSnapshot(
 /** Due when the destination holds no snapshot from today, in local time. */
 export function snapshotDue(folder: string, now = new Date()): boolean {
   const newest = listSnapshots(folder).at(-1)
-  return !newest || dayKey(new Date(newest.at)) !== dayKey(now)
+  if (!newest) return true
+  // A file stamped ahead by a clock that was briefly wrong counts as today's,
+  // or every pass would take another copy until that date arrived.
+  if (Date.parse(newest.at) > now.getTime()) return false
+  return dayKey(new Date(newest.at)) !== dayKey(now)
+}
+
+/** Empties the work folder; only the lock holder uses it, so anything there is left from a killed run. */
+export function clearWorkDir(workDir: string): void {
+  let names: string[]
+  try {
+    names = readdirSync(workDir)
+  } catch {
+    return
+  }
+  for (const name of names) removeQuietly(join(workDir, name))
 }
 
 /**

@@ -24,6 +24,7 @@ import {
   type SnapshotConfig,
   type SnapshotStatus,
   checkRestore,
+  clearWorkDir,
   listSnapshots,
   loadSnapshotConfig,
   snapshotDue,
@@ -449,7 +450,7 @@ function isServiceProcess(pid: number): boolean {
   if (!alive(pid)) return false
   try {
     const args = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' })
-    return /litestream|backup/.test(args) && /\bserve\b/.test(args)
+    return /purecontext-backup|@purecontext\/backup|litestream/.test(args) && /\bserve\b/.test(args)
   } catch {
     return true
   }
@@ -852,6 +853,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     server.close()
     return
   }
+  clearWorkDir(paths.workDir)
   log(`backup service ${version} listening on ${paths.socket} (pid ${process.pid}, binary ${bin})`)
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'))

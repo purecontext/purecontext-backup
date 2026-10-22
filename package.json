@@ -1,7 +1,7 @@
 {
-  "name": "@purecontext/litestream",
-  "version": "0.3.4",
-  "description": "Litestream sidecar for SQLite backup — shared across Pure Context projects",
+  "name": "@purecontext/backup",
+  "version": "0.4.0",
+  "description": "SQLite backup service: continuous Litestream replication plus verified, rotated snapshots to a folder you choose",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,10 +22,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/purecontext/purecontext-litestream.git"
+    "url": "https://github.com/purecontext/purecontext-backup.git"
   },
   "license": "MIT",
-  "keywords": ["litestream", "sqlite", "backup", "replication", "s3"],
+  "keywords": ["litestream", "sqlite", "backup", "replication", "s3", "snapshots"],
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@types/node": "^22.0.0",
@@ -35,6 +35,6 @@
     "onlyBuiltDependencies": ["@biomejs/biome"]
   },
   "bin": {
-    "purecontext-litestream": "dist/cli.js"
+    "purecontext-backup": "dist/cli.js"
   }
 }

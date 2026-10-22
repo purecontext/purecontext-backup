@@ -1,6 +1,6 @@
 {
   "name": "@purecontext/backup",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "SQLite backup service: continuous Litestream replication plus verified, rotated snapshots to a folder you choose",
   "type": "module",
   "main": "dist/index.js",

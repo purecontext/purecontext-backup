@@ -32,6 +32,7 @@ import {
   snapshotProblems,
   takeSnapshot,
 } from './snapshot.js'
+import { removeStatusFile, writeStatusFile } from './status-file.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -643,6 +644,15 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       dbs,
     }
   }
+  // Read by clients that need health without a socket call, such as a
+  // session-start check that must finish in milliseconds.
+  const saveStatus = () => {
+    try {
+      writeStatusFile(paths, status())
+    } catch (err) {
+      log(`cannot write ${paths.statusFile}: ${firstLine(err)}`)
+    }
+  }
 
   // One database at a time, outside the registration queue: a copy takes
   // seconds, and registrations must not wait on it.
@@ -675,6 +685,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       }
     } finally {
       snapshotting = false
+      saveStatus()
     }
   }
 
@@ -687,6 +698,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     if (snapshotTimer) clearInterval(snapshotTimer)
     if (idleTimer) clearTimeout(idleTimer)
     server.close()
+    removeStatusFile(paths)
     // A registration already in the queue finishes first, so the replicator
     // it starts is stopped below rather than orphaned by the exit.
     await serial(async () => {})
@@ -804,17 +816,20 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
           await serial(pruneMissing)
           armIdleExit()
           await Promise.all([...replicators.values()].map((r) => r.checkHealth()))
+          saveStatus()
         }
         return send(res, 200, status())
       }
       if (req.method === 'POST' && url.pathname === '/register') {
         const result = await register(validateSpec(await readBody(req)))
+        saveStatus()
         return send(res, result.status, result.body)
       }
       if (req.method === 'POST' && url.pathname === '/unregister') {
         const body = (await readBody(req)) as { dbPath?: unknown }
         if (typeof body.dbPath !== 'string') return send(res, 400, { error: 'dbPath is required' })
         const result = await unregister(canonicalDbPath(body.dbPath))
+        saveStatus()
         send(res, result.status, result.body)
         void shutdownIfIdle('last database unregistered')
         return
@@ -871,6 +886,7 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     }
   })
   armIdleExit()
+  saveStatus()
 
   // A racer that lost the lock late may already have unlinked our socket, and
   // a client that finds no socket gets bounced by our lock; listen again.
@@ -897,8 +913,11 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   healthTimer = setInterval(async () => {
     await serial(pruneMissing).catch((err) => log(`cannot prune missing databases: ${firstLine(err)}`))
     armIdleExit()
-    for (const r of replicators.values()) {
-      r.checkHealth().catch((err) => log(`health check failed for ${r.spec.dbPath}: ${firstLine(err)}`))
-    }
+    await Promise.all(
+      [...replicators.values()].map((r) =>
+        r.checkHealth().catch((err) => log(`health check failed for ${r.spec.dbPath}: ${firstLine(err)}`)),
+      ),
+    )
+    if (!shuttingDown) saveStatus()
   }, HEALTH_INTERVAL_MS)
 }

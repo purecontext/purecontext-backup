@@ -15,6 +15,7 @@ export interface ServicePaths {
   dbDir: string
   snapshotState: string
   workDir: string
+  statusFile: string
 }
 
 // The home keeps its litestream name from before the package was renamed:
@@ -36,6 +37,7 @@ export function servicePaths(
     dbDir: join(home, 'dbs'),
     snapshotState: join(home, 'snapshots.json'),
     workDir: join(home, 'work'),
+    statusFile: join(home, 'status.json'),
   }
 }
 

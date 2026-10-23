@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -14,7 +15,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { after, before, describe, test } from 'node:test'
-import { registerDatabase, serviceStatus, stopService, unregisterDatabase } from '../dist/index.js'
+import {
+  backupProblems,
+  readStatusFile,
+  registerDatabase,
+  serviceStatus,
+  stopService,
+  unregisterDatabase,
+} from '../dist/index.js'
 import { servicePaths } from '../dist/paths.js'
 
 // Every call below passes its own fixture paths, but one that forgets falls
@@ -345,6 +353,35 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     assert.equal(alive(dbs[0].pid), false)
     assert.equal(existsSync(paths.socket), false)
     assert.equal(existsSync(paths.lock), false)
+    a.db.close()
+  })
+
+  test('a status file tells a client what is wrong without a socket call', async () => {
+    const { home, paths, opts } = make()
+    const a = makeDb(home, 'a.db')
+    const stranger = join(home, 'never-registered.db')
+    assert.deepEqual(backupProblems([a.path], { paths }), { running: false, problems: [] })
+
+    await registerDatabase(opts(a), paths)
+    const written = readStatusFile(paths)
+    assert.ok(written, 'registration writes the status file')
+    assert.equal(written.status.dbs[0].dbPath, realpathSync.native(a.path))
+    // Not checked yet is not a problem; an unknown database is.
+    assert.deepEqual(backupProblems([a.path], { paths }), { running: true, problems: [] })
+    assert.match(backupProblems([stranger], { paths }).problems[0], /is not registered with the backup service/)
+
+    await until(async () => {
+      const s = await serviceStatus({ refresh: true }, paths)
+      return s?.dbs[0]?.health?.ok ? s : null
+    })
+    assert.equal(readStatusFile(paths).status.dbs[0].health.ok, true, 'a refresh rewrites the file')
+
+    const later = Date.parse(readStatusFile(paths).writtenAt) + 20 * 60_000
+    assert.match(backupProblems([a.path], { paths, now: later }).problems[0], /has not reported in 20 min/)
+
+    await unregisterDatabase(a.path, paths)
+    await until(() => !existsSync(paths.lock))
+    assert.equal(existsSync(paths.statusFile), false, 'shutdown removes the file')
     a.db.close()
   })
 

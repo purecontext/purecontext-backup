@@ -59,6 +59,10 @@ purecontext-backup serve         # run in the foreground
 
 `serviceStatus()`, `unregisterDatabase()` and `stopService()` do the same from code.
 
+### Health without a socket call
+
+The service writes its status to `status.json` in its home after every health check, snapshot pass and registration, and removes it when it stops. `backupProblems(dbPaths)` reads that file and returns `{ running, problems }` for the databases you name. It reads only files, so it is cheap enough for a startup hook. A database the service has not checked yet is not a problem. A database it does not know is a problem, and so is a file more than 15 minutes old, which means its health checks have stopped. When no service is running, `running` is false and `problems` is empty, because the next registration starts one.
+
 ### File replicas
 
 Set `replicaType: 'file'` and an absolute `replicaPath` to replicate to a local directory instead of S3. No credentials are needed. This works with the sidecar too.

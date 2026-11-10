@@ -161,6 +161,25 @@ describe('litestream service', { skip: !hasBinary && 'litestream binary not inst
     }
   })
 
+  test('a database whose old change files expired still reads as current', async () => {
+    const { home, paths, opts } = make()
+    const a = makeDb(home, 'a.db')
+    const fast = { ...opts(a), levels: ['1s'], l0Retention: '1s', l0RetentionCheckInterval: '1s' }
+    await registerDatabase(fast, paths)
+    for (let i = 0; i < 10; i++) a.db.prepare('INSERT INTO t (v) VALUES (?)').run(`row ${i}`)
+    const l0 = join(home, 'replica', 'a.db', 'ltx', '0')
+    const l1 = join(home, 'replica', 'a.db', 'ltx', '1')
+    const count = (dir) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.ltx')).length : 0)
+    // Retention keeps only the newest L0 file, which the check reads.
+    await until(() => count(l1) > 0 && count(l0) === 1, 30_000)
+    const health = await until(async () => {
+      const h = (await serviceStatus({ refresh: true }, paths)).dbs[0].health
+      return h?.remoteTxid !== undefined && h.remoteTxid === h.localTxid ? h : null
+    })
+    assert.deepEqual(health.problems, [])
+    a.db.close()
+  })
+
   test('the same file spelled in another case is the same database', async () => {
     const { home, paths, opts } = make()
     const a = makeDb(home, 'a.db')
@@ -627,6 +646,24 @@ describe('sidecar config', () => {
     assert.match(
       config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file' }]),
       /type: file\n\s+path: \/r/,
+    )
+  })
+
+  test('every compaction level is written, and change files expire after 72h', () => {
+    const yml = config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file' }])
+    assert.match(yml, /\nlevels:\n {2}- interval: 5m\n {2}- interval: 1h\n {2}- interval: 24h\n/)
+    assert.match(yml, /\nl0-retention: 72h\n/)
+    assert.match(
+      config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file', levels: ['10s'] }]),
+      /\nlevels:\n {2}- interval: 10s\n\n/,
+    )
+    assert.throws(
+      () => config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file', levels: ['5m', '0s'] }]),
+      /levels\[1\]\.interval must be greater than 0/,
+    )
+    assert.throws(
+      () => config.generateConfig([{ dbPath: '/x.db', replicaPath: '/r', replicaType: 'file', levels: [] }]),
+      /at least one interval/,
     )
   })
 

@@ -149,6 +149,12 @@ function configFromArgs(args: string): string | null {
 // execFile default within weeks of steady writes.
 const LISTING_BUFFER = 256 * 1024 * 1024
 
+interface ReplicaFile {
+  level: number
+  max_txid: string
+  timestamp: string
+}
+
 async function foreignReplicators(dbPath: string, own: Set<number>): Promise<number[]> {
   const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,args='], { maxBuffer: LISTING_BUFFER })
   const found: number[] = []
@@ -351,11 +357,7 @@ class Replicator {
         problems.push(`cannot read local status: ${firstLine(err)}`)
       }
       try {
-        const { stdout } = await execFileAsync(this.bin, ['ltx', '-level', 'all', '-json', ...config, dbPath], {
-          timeout: 60_000,
-          maxBuffer: LISTING_BUFFER,
-        })
-        const files: { level: number; max_txid: string; timestamp: string }[] = JSON.parse(stdout) ?? []
+        const files = await this.replicaFiles(config, dbPath)
         const changes = files.filter((f) => f.level < 9)
         if (files.length > 0) {
           health.remoteTxid = Math.max(...files.map((f) => Number.parseInt(f.max_txid, 16)))
@@ -390,6 +392,25 @@ class Replicator {
     }
     health.ok = problems.length === 0
     this.health = health
+  }
+
+  // Each level listed is one LIST call per 1,000 files on the replica, every
+  // check, for every database; `-level all` lists ten levels. L0 is where
+  // uploads land, so it is the direct proof that changes reach the replica,
+  // and the freshest position. L0 retention never deletes the newest L0 file
+  // (checked against 0.5.17), so L0 is empty only on a replica that has never
+  // received a change, and every level is listed then, to tell "only
+  // snapshots are landing" from a replica with nothing at all.
+  private async replicaFiles(config: string[], dbPath: string): Promise<ReplicaFile[]> {
+    for (const level of ['0', 'all']) {
+      const { stdout } = await execFileAsync(this.bin, ['ltx', '-level', level, '-json', ...config, dbPath], {
+        timeout: 60_000,
+        maxBuffer: LISTING_BUFFER,
+      })
+      const files: ReplicaFile[] = JSON.parse(stdout) ?? []
+      if (files.length > 0 || level === 'all') return files
+    }
+    return []
   }
 
   restoreDue(days: number): boolean {

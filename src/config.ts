@@ -14,6 +14,8 @@ export interface LitestreamOptions {
   retention?: string
   l0Retention?: string
   l0RetentionCheckInterval?: string
+  /** Compaction intervals for levels 1, 2, 3, ... in order. */
+  levels?: string[]
   envFile?: string
   logFile?: string
   logLevel?: 'debug' | 'info' | 'warn' | 'error'
@@ -44,8 +46,21 @@ export function describeReplica(opts: LitestreamOptions): string {
 // ignored. Misplacing a key yields a running daemon with defaults and no error,
 // so placement below is load-bearing and verified against the 0.5.x binary.
 //
-// Top level: l0-retention, l0-retention-check-interval, snapshot.{interval,retention}
+// Top level: l0-retention, l0-retention-check-interval, snapshot.{interval,retention},
+// levels[].interval
 // Replica level: bucket, path, endpoint, region, credentials, force-path-style, sync-interval
+//
+// `levels` replaces litestream's whole list (default L1 30s, L2 5m, L3 1h), so
+// every level is written out: a one-entry list leaves only L1 and the L9
+// snapshot level (checked against 0.5.17). Each compaction tick LISTs the level
+// below on the replica, idle or not, and on 0.5.17 an idle L1 tick can page
+// through all of L0 (upstream #1563). L1 at 5m is ten times fewer ticks;
+// changes still upload every sync-interval, only restore points get coarser.
+//
+// L0 retention bounds how many change files every L0 listing pages through.
+// It was a year, so nothing expired and listings grew without limit (12k files
+// on one database). 72h keeps every change file for three days, and L1 keeps
+// 5-minute restore points for the snapshot retention after that.
 //
 // The L0 retention monitor issues 2 LIST calls per check per database regardless
 // of whether the database changed (upstream issue #1171). At the 15s default that
@@ -81,14 +96,17 @@ function replicaSection(opts: LitestreamOptions): string {
 
 export function generateConfig(dbs: LitestreamOptions[]): string {
   const first = dbs[0]
-  const l0Retention = first.l0Retention ?? '8760h'
+  const l0Retention = first.l0Retention ?? '72h'
   const l0CheckInterval = first.l0RetentionCheckInterval ?? '24h'
+  const levels = first.levels ?? ['5m', '1h', '24h']
   const snapshotInterval = first.snapshotInterval ?? '24h'
   const snapshotRetention = first.retention ?? '720h'
   const logLevel = first.logLevel ?? 'warn'
 
   assertPositiveDuration(l0Retention, 'l0-retention')
   assertPositiveDuration(l0CheckInterval, 'l0-retention-check-interval')
+  if (levels.length === 0) throw new Error('[litestream] levels must list at least one interval')
+  levels.forEach((interval, i) => assertPositiveDuration(interval, `levels[${i}].interval`))
 
   const sections = dbs.map(
     (opts) => `  - path: ${opts.dbPath}
@@ -104,6 +122,9 @@ ${replicaSection(opts)}`,
 
 l0-retention: ${l0Retention}
 l0-retention-check-interval: ${l0CheckInterval}
+
+levels:
+${levels.map((interval) => `  - interval: ${interval}`).join('\n')}
 
 snapshot:
   interval: ${snapshotInterval}

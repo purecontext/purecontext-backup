@@ -41,7 +41,7 @@ Create the database before registering it; a path that does not exist is refused
 - **One service per home.** A lock decides between clients that start it at the same moment, and a lock left by a dead process is reclaimed.
 - **Upgrades.** A client newer than the running service stops it and starts its own version. The registrations carry over.
 - **Supervision.** A replicator that exits, or fails to start, is retried with backoff, up to one minute between attempts.
-- **Health.** Every five minutes the service compares the replica with the local database. It reports a problem when the replica has no change files, so only snapshots are landing. It also reports one when the replica is behind and has received nothing for five minutes, and when litestream reports no local position for the database, so lag cannot be measured. A running process proves nothing on its own: the service is `ok` only when every database is running and has passed a check. A database not yet checked shows `health: null`, printed as `unchecked`, and is not `ok`.
+- **Health.** Every five minutes the service compares the replica with the local database. It reports a problem when the replica has no change files, so only snapshots are landing. It also reports one when the replica is behind and has received nothing for five minutes, and when litestream reports no local position for the database, so lag cannot be measured. A running process proves nothing on its own: the service is `ok` only when every database is running and has passed a check. A database not yet checked shows `health: null`, printed as `unchecked`, and is not `ok`. A check lists only the replica's L0 change files, one storage request per 1,000 files, and lists every level only when L0 is empty.
 
 Credentials resolve in the client, as below, and travel with the registration. The service's own environment is never consulted.
 
@@ -138,6 +138,8 @@ Environment variables are loaded non-destructively. If a variable is already set
 | `syncInterval` | | `1s` | How often WAL frames are replicated. |
 | `snapshotInterval` | | `24h` | How often full snapshots are taken. |
 | `retention` | | `720h` | How long to keep backup history (30 days). |
+| `l0Retention` | | `72h` | How long every change file is kept before only the compacted levels remain. Every listing of the replica pages through these files. |
+| `levels` | | `['5m', '1h', '24h']` | Compaction intervals for levels 1, 2 and 3. Each tick lists the level below on the replica, so shorter intervals cost more requests. Changes still upload every `syncInterval`. |
 | `envFile` | | `~/.config/purecontext/litestream.env` | Custom env file path. |
 | `name` | | `pid-{process.pid}` | Sidecar only. Stable identifier for this instance. Controls config filename and orphan detection. |
 | `configDir` | | system temp dir | Sidecar only. Directory for the generated Litestream config file. |

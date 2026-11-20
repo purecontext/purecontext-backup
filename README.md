@@ -81,6 +81,10 @@ It has no replica, so there are no restore checks for it. Any number of snapshot
 
 When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on a replicated database when it registers and again at each health check; it leaves a snapshot-only database's sidecars alone, so stop those yourself. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
 
+### Older services
+
+Every client on a machine shares one service. Whichever client starts it first runs its own version, and a newer client replaces an older service the next time it registers. While a service from 0.4.3 or earlier owns the folder, snapshot-only databases get no snapshots and do not appear in `status`, since it never reads `registry-snapshot-only.json`. Changes made through it reach only `registry.json`: a database it registers with a replica wins over a snapshot-only registration of the same file. To end the gap, move every client to 0.4.5 or later. 0.4.4 kept snapshot-only registrations in `registry.json`, where those services resume them as s3 replicas at the path `undefined`; 0.4.5 moves them out when it starts.
+
 ## Snapshots
 
 Replication copies every change, including a damaged one, to one storage account under one set of credentials. Snapshots are the second layer: whole copies of each registered database, in a place with its own credentials, kept long enough to outlast a mistake.

@@ -641,11 +641,15 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   // Snapshot-only registrations live in a file of their own. A service from
   // 0.4.3 or earlier resumes every entry in registry.json without checking it,
   // and reads replicaType 'none' as an s3 replica at path "undefined", using
-  // the real credentials. It never opens the other file.
+  // the real credentials. It never opens the other file. Old services and
+  // clients write registry.json alone, so the two files only stay consistent
+  // while this version owns the home; README, "Older services".
   const readDbs = (file: string): Record<string, DatabaseSpec> => {
     try {
       return JSON.parse(readFileSync(file, 'utf8')).dbs ?? {}
-    } catch {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
+        log(`cannot read ${file}, starting it empty: ${firstLine(err)}`)
       return {}
     }
   }
@@ -655,16 +659,27 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
     renameSync(tmp, file)
   }
   const replicated = readDbs(paths.registry)
-  const registry: Record<string, DatabaseSpec> = { ...replicated, ...readDbs(paths.snapshotRegistry) }
+  const snapshotOnly = readDbs(paths.snapshotRegistry)
+  // A database in both files was registered with a replica by an older
+  // service after this one recorded it as snapshot-only (a crash mid-save
+  // leaves two snapshot-only copies, which agree). The replica is newer.
+  for (const dbPath of Object.keys(snapshotOnly)) {
+    const other = replicated[dbPath]
+    if (other && other.replicaType !== 'none')
+      log(`${dbPath} is registered both ways; keeping its replica to ${describeReplica(other)}`)
+  }
+  const registry: Record<string, DatabaseSpec> = { ...snapshotOnly, ...replicated }
+  // 0.4.4 kept snapshot-only registrations in registry.json.
+  const legacy = Object.values(replicated).some((s) => s.replicaType === 'none')
   const saveRegistry = () => {
     const specs = Object.entries(registry)
     // The snapshot-only file is written first, so an entry moving out of
-    // registry.json is never in neither.
+    // registry.json is never in neither. A new replicated registration is
+    // written second, so a crash between the two loses it before it is
+    // acknowledged.
     writeDbs(paths.snapshotRegistry, Object.fromEntries(specs.filter(([, s]) => s.replicaType === 'none')))
     writeDbs(paths.registry, Object.fromEntries(specs.filter(([, s]) => s.replicaType !== 'none')))
   }
-  // 0.4.4 kept them in registry.json; move them out before anything else runs.
-  if (Object.values(replicated).some((s) => s.replicaType === 'none')) saveRegistry()
 
   let queue: Promise<unknown> = Promise.resolve()
   const serial = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -954,6 +969,8 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   // Clients can register while this runs, so it shares their queue, and a
   // database one of them already started is not started twice.
   await serial(async () => {
+    // Moved only once this service holds the lock: a racer that lost must not write.
+    if (legacy) saveRegistry()
     await pruneMissing()
     for (const spec of Object.values(registry)) {
       if (replicators.has(spec.dbPath)) continue

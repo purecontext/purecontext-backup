@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   copyFileSync,
   createReadStream,
@@ -13,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir, hostname } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import { createGzip } from 'node:zlib'
@@ -46,6 +47,11 @@ export interface SnapshotFile {
   bytes: number
 }
 
+/** A pass's result: the snapshot it saved, or the newest one when the database had not changed since. */
+export interface SnapshotResult extends SnapshotFile {
+  unchanged: boolean
+}
+
 export interface RestoreCheck {
   at: string
   ok: boolean
@@ -58,6 +64,8 @@ export interface SnapshotStatus {
   kept: number
   lastError: { at: string; message: string } | null
   restoreCheck: RestoreCheck | null
+  /** When a pass last found the database unchanged since `newest`; null when none has. */
+  unchangedAt: string | null
   problems: string[]
 }
 
@@ -243,6 +251,73 @@ function sweepPartials(folder: string): void {
   }
 }
 
+// Each snapshot folder keeps the hash of its newest snapshot's database and
+// when a pass last found the live database matching it. The backup API copies
+// pages as they are, so an unchanged database gives a byte-identical copy.
+const STATE_FILE = 'state.json'
+
+interface FolderState {
+  file: string
+  sha256: string
+  /** The landed file's size, so a newest snapshot rewritten in the destination is never re-confirmed. */
+  bytes?: number
+  unchangedAt: string | null
+}
+
+// The newest snapshot is the one state.json describes, still at the size it landed at.
+function describesNewest(state: FolderState | null, newest: SnapshotFile | undefined): boolean {
+  return !!newest && !!state && basename(newest.path) === state.file && newest.bytes === state.bytes
+}
+
+function rotate(folder: string, keep: Keep): void {
+  const files = listSnapshots(folder)
+  const kept = selectKept(
+    files.map((f) => new Date(f.at)),
+    keep,
+  )
+  files.forEach((f, i) => {
+    if (!kept.has(i)) removeQuietly(f.path)
+  })
+}
+
+function readState(folder: string): FolderState | null {
+  try {
+    const state = JSON.parse(readFileSync(join(folder, STATE_FILE), 'utf8'))
+    return typeof state?.file === 'string' && typeof state?.sha256 === 'string' ? state : null
+  } catch {
+    return null
+  }
+}
+
+function writeState(folder: string, state: FolderState): void {
+  const tmp = join(folder, `.${STATE_FILE}.${process.pid}.tmp`)
+  writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
+  renameSync(tmp, join(folder, STATE_FILE))
+}
+
+async function sha256(path: string): Promise<string> {
+  const hash = createHash('sha256')
+  await pipeline(createReadStream(path), hash)
+  return hash.digest('hex')
+}
+
+/** When the newest snapshot was confirmed to match the live database: a pass that found it unchanged. */
+export function unchangedSince(folder: string): string | null {
+  const newest = listSnapshots(folder).at(-1)
+  const state = readState(folder)
+  if (!state?.unchangedAt || !describesNewest(state, newest)) return null
+  return state.unchangedAt
+}
+
+// The latest moment the destination is known to hold the database as it was:
+// the newest snapshot, or a later pass that found it unchanged.
+function coveredAt(folder: string): string | null {
+  const newest = listSnapshots(folder).at(-1)
+  if (!newest) return null
+  const unchanged = unchangedSince(folder)
+  return unchanged && unchanged > newest.at ? unchanged : newest.at
+}
+
 /**
  * Copies the live database with SQLite's backup API, checks the copy, and
  * moves it into the destination compressed, then applies the rotation. The
@@ -254,7 +329,7 @@ export async function takeSnapshot(
   settings: SnapshotSettings,
   workDir: string,
   now = new Date(),
-): Promise<SnapshotFile> {
+): Promise<SnapshotResult> {
   const { DatabaseSync, backup } = await sqlite()
   // A missing destination is usually a sync client that is not running or not
   // signed in. Creating it would put snapshots on local disk under the synced
@@ -277,6 +352,7 @@ export async function takeSnapshot(
   const work = join(workDir, `${name.slice(0, -3)}.${process.pid}`)
   const partial = join(folder, `.${name}.partial`)
   const target = join(folder, name)
+  let hash: string
   try {
     const live = new DatabaseSync(dbPath, { readOnly: true })
     try {
@@ -292,6 +368,15 @@ export async function takeSnapshot(
       copy.close()
     }
     await verifyDatabase(work)
+    hash = await sha256(work)
+    const newest = listSnapshots(folder).at(-1)
+    const state = readState(folder)
+    if (newest && state?.sha256 === hash && describesNewest(state, newest)) {
+      writeState(folder, { ...state, unchangedAt: now.toISOString() })
+      // Rotation still runs, so a lowered keep takes effect without waiting for a change.
+      rotate(folder, settings.keep)
+      return { ...newest, unchanged: true }
+    }
     // Compress on local disk, then copy and rename, so the synced folder only
     // ever sees a whole file under its final name.
     await pipeline(createReadStream(work), createGzip(), createWriteStream(`${work}.gz`))
@@ -301,30 +386,27 @@ export async function takeSnapshot(
     const landed = statSync(partial).size
     if (landed !== expected) throw new Error(`copy into the destination is short: ${landed} of ${expected} bytes`)
     renameSync(partial, target)
+    writeState(folder, { file: name, sha256: hash, bytes: landed, unchangedAt: null })
   } finally {
     for (const suffix of ['', '-wal', '-shm', '-journal', '.gz']) removeQuietly(`${work}${suffix}`)
     removeQuietly(partial)
   }
 
-  const files = listSnapshots(folder)
-  const kept = selectKept(
-    files.map((f) => new Date(f.at)),
-    settings.keep,
-  )
-  files.forEach((f, i) => {
-    if (!kept.has(i)) removeQuietly(f.path)
-  })
-  return { at: now.toISOString(), path: target, bytes: statSync(target).size }
+  rotate(folder, settings.keep)
+  return { at: now.toISOString(), path: target, bytes: statSync(target).size, unchanged: false }
 }
 
-/** Due when the destination holds no snapshot from today, in local time. */
+/**
+ * Due when nothing has covered today, in local time: no snapshot from today,
+ * and no pass today that found the database unchanged since the newest one.
+ */
 export function snapshotDue(folder: string, now = new Date()): boolean {
-  const newest = listSnapshots(folder).at(-1)
-  if (!newest) return true
+  const covered = coveredAt(folder)
+  if (!covered) return true
   // A file stamped ahead by a clock that was briefly wrong counts as today's,
   // or every pass would take another copy until that date arrived.
-  if (Date.parse(newest.at) > now.getTime()) return false
-  return dayKey(new Date(newest.at)) !== dayKey(now)
+  if (Date.parse(covered) > now.getTime()) return false
+  return dayKey(new Date(covered)) !== dayKey(now)
 }
 
 /** Empties the work folder; only the lock holder uses it, so anything there is left from a killed run. */
@@ -383,9 +465,9 @@ export function snapshotProblems(
   now = Date.now(),
 ): string[] {
   const problems: string[] = []
-  const newest = listSnapshots(folder).at(-1)
-  if (newest) {
-    const age = now - Date.parse(newest.at)
+  const covered = coveredAt(folder)
+  if (covered) {
+    const age = now - Date.parse(covered)
     if (age > STALE_SNAPSHOT_MS) problems.push(`the newest snapshot is ${Math.round(age / 3_600_000)} h old`)
   } else if (now - runningSinceMs > STALE_SNAPSHOT_MS) {
     problems.push(`no snapshot has reached ${folder}`)

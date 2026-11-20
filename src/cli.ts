@@ -7,7 +7,8 @@ const USAGE = `usage: purecontext-backup <command>
 
   serve [--home <dir>]  run the backup service in the foreground
   status [--json] [--cached]
-                        show each registered database, its replica health and
+                        show each registered database, its replica health (or
+                        snapshots only) and
                         its snapshots; exits 1 when anything has a problem, 2
                         when the service is not running
   unregister <dbPath>   stop backing up a database
@@ -57,6 +58,7 @@ switch (command) {
         console.log(`  ${mark.padEnd(9)} ${db.dbPath} → ${db.replica}`)
         if (db.snapshot?.newest) {
           console.log(`            snapshot ${ago(db.snapshot.newest.at)}, ${db.snapshot.kept} kept`)
+          if (db.snapshot.unchangedAt) console.log(`            unchanged as of ${ago(db.snapshot.unchangedAt)}`)
         }
         if (db.snapshot?.restoreCheck?.ok) {
           console.log(`            restore check passed ${ago(db.snapshot.restoreCheck.at)}`)

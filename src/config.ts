@@ -1,9 +1,12 @@
-export interface LitestreamOptions {
+/** The settings the config helpers read. Callers pass LitestreamOptions, which checks replicaPath. */
+export interface ReplicaSettings {
   name?: string
   configDir?: string
   dbPath: string
-  replicaPath: string
-  replicaType?: 's3' | 'file'
+  /** Required unless replicaType is 'none'. */
+  replicaPath?: string
+  /** 'none' runs no replicator: the database is backed up by the daily snapshots alone. */
+  replicaType?: 's3' | 'file' | 'none'
   bucket?: string
   endpoint?: string
   region?: string
@@ -21,7 +24,11 @@ export interface LitestreamOptions {
   logLevel?: 'debug' | 'info' | 'warn' | 'error'
 }
 
-export function resolveEnv(opts: LitestreamOptions) {
+/** What a caller registers: replicaPath is required unless replicaType is 'none'. */
+export type LitestreamOptions = ReplicaSettings &
+  ({ replicaType?: 's3' | 'file'; replicaPath: string } | { replicaType: 'none'; replicaPath?: undefined })
+
+export function resolveEnv(opts: ReplicaSettings) {
   return {
     bucket: opts.bucket ?? process.env.LITESTREAM_BUCKET,
     endpoint: opts.endpoint ?? process.env.LITESTREAM_ENDPOINT,
@@ -31,14 +38,15 @@ export function resolveEnv(opts: LitestreamOptions) {
   }
 }
 
-export function missingCredentials(opts: LitestreamOptions): string[] {
-  if (opts.replicaType === 'file') return []
+export function missingCredentials(opts: ReplicaSettings): string[] {
+  if (opts.replicaType === 'file' || opts.replicaType === 'none') return []
   const env = resolveEnv(opts)
   return (['bucket', 'endpoint', 'accessKeyId', 'secretAccessKey'] as const).filter((k) => !env[k])
 }
 
-export function describeReplica(opts: LitestreamOptions): string {
+export function describeReplica(opts: ReplicaSettings): string {
   if (opts.replicaType === 'file') return `file://${opts.replicaPath}`
+  if (opts.replicaType === 'none') return 'none (snapshots only)'
   return `s3://${resolveEnv(opts).bucket}/${opts.replicaPath}`
 }
 
@@ -75,7 +83,7 @@ function assertPositiveDuration(value: string, key: string): void {
   }
 }
 
-function replicaSection(opts: LitestreamOptions): string {
+function replicaSection(opts: ReplicaSettings): string {
   const sync = opts.syncInterval ?? '1s'
   if (opts.replicaType === 'file') {
     return `      - type: file
@@ -94,7 +102,12 @@ function replicaSection(opts: LitestreamOptions): string {
         sync-interval: ${sync}`
 }
 
-export function generateConfig(dbs: LitestreamOptions[]): string {
+export function generateConfig(dbs: ReplicaSettings[]): string {
+  if (dbs.some((db) => db.replicaType === 'none')) {
+    throw new Error("[litestream] a database with replicaType 'none' has no replica to configure")
+  }
+  const unpathed = dbs.find((db) => !db.replicaPath)
+  if (unpathed) throw new Error(`[litestream] ${unpathed.dbPath} has no replicaPath`)
   const first = dbs[0]
   const l0Retention = first.l0Retention ?? '72h'
   const l0CheckInterval = first.l0RetentionCheckInterval ?? '24h'

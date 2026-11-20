@@ -47,8 +47,8 @@ const dir = () => {
   return d
 }
 
-function makeDb(path, rows = 200) {
-  const db = new DatabaseSync(path)
+function makeDb(path, rows = 200, options = {}) {
+  const db = new DatabaseSync(path, options)
   db.exec('PRAGMA journal_mode = WAL; CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
   const insert = db.prepare('INSERT INTO t (v) VALUES (?)')
   for (let i = 0; i < rows; i++) insert.run(`row ${i} ${'x'.repeat(200)}`)
@@ -160,7 +160,8 @@ describe('snapshots', () => {
 
   test('damage SQLite reads without error is still caught by the integrity check', async () => {
     const path = join(dir(), 'skewed.db')
-    const db = makeDb(path)
+    // Newer Node opens databases in defensive mode, which forbids writing the schema.
+    const db = makeDb(path, 200, { defensive: false })
     // An index whose definition no longer matches its entries: every query
     // still works, and only the integrity check's findings reveal it.
     db.exec(`CREATE INDEX i ON t(v); PRAGMA writable_schema = ON;

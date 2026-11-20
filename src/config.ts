@@ -2,8 +2,10 @@ export interface LitestreamOptions {
   name?: string
   configDir?: string
   dbPath: string
-  replicaPath: string
-  replicaType?: 's3' | 'file'
+  /** Required unless replicaType is 'none'. */
+  replicaPath?: string
+  /** 'none' runs no replicator: the database is backed up by the daily snapshots alone. */
+  replicaType?: 's3' | 'file' | 'none'
   bucket?: string
   endpoint?: string
   region?: string
@@ -32,13 +34,14 @@ export function resolveEnv(opts: LitestreamOptions) {
 }
 
 export function missingCredentials(opts: LitestreamOptions): string[] {
-  if (opts.replicaType === 'file') return []
+  if (opts.replicaType === 'file' || opts.replicaType === 'none') return []
   const env = resolveEnv(opts)
   return (['bucket', 'endpoint', 'accessKeyId', 'secretAccessKey'] as const).filter((k) => !env[k])
 }
 
 export function describeReplica(opts: LitestreamOptions): string {
   if (opts.replicaType === 'file') return `file://${opts.replicaPath}`
+  if (opts.replicaType === 'none') return 'none (snapshots only)'
   return `s3://${resolveEnv(opts).bucket}/${opts.replicaPath}`
 }
 
@@ -95,6 +98,9 @@ function replicaSection(opts: LitestreamOptions): string {
 }
 
 export function generateConfig(dbs: LitestreamOptions[]): string {
+  if (dbs.some((db) => db.replicaType === 'none')) {
+    throw new Error("[litestream] a database with replicaType 'none' has no replica to configure")
+  }
   const first = dbs[0]
   const l0Retention = first.l0Retention ?? '72h'
   const l0CheckInterval = first.l0RetentionCheckInterval ?? '24h'

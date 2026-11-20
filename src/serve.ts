@@ -31,6 +31,7 @@ import {
   snapshotFolder,
   snapshotProblems,
   takeSnapshot,
+  unchangedSince,
 } from './snapshot.js'
 import { removeStatusFile, writeStatusFile } from './status-file.js'
 
@@ -225,10 +226,21 @@ class Replicator {
     this.lastError = { at: new Date().toISOString(), message }
   }
 
+  get snapshotOnly(): boolean {
+    return this.spec.replicaType === 'none'
+  }
+
   // Never rejects: a start that fails goes to backoff and is retried, so no
   // caller (a registration, the resume, a retry) can leave it stuck.
   async start(): Promise<void> {
     this.stopping = false
+    // Nothing to launch: the snapshot pass is this database's only backup.
+    if (this.snapshotOnly) {
+      this.state = 'running'
+      this.startedAt = new Date().toISOString()
+      this.write('registered for snapshots only; no replicator runs')
+      return
+    }
     try {
       await this.launch()
     } catch (err) {
@@ -330,6 +342,16 @@ class Replicator {
   async checkHealth(): Promise<void> {
     const problems: string[] = []
     const health: Health = { ok: true, problems, checkedAt: new Date().toISOString() }
+    if (this.snapshotOnly) {
+      // Its snapshots' own problems come from the destination, in describe().
+      const config = loadSnapshotConfig()
+      if (config.state === 'off') problems.push('snapshots are off, so nothing backs up this database')
+      else if (config.state === 'invalid')
+        problems.push('snapshots are misconfigured, so nothing backs up this database')
+      health.ok = problems.length === 0
+      this.health = health
+      return
+    }
     // Every restart resets the settle period, so a replicator that dies within
     // a minute would never be judged on change files; count its exits instead.
     const recentExits = this.exits.filter((t) => Date.now() - t < CRASH_WINDOW_MS).length
@@ -414,7 +436,7 @@ class Replicator {
   }
 
   restoreDue(days: number): boolean {
-    if (days <= 0 || this.state !== 'running') return false
+    if (days <= 0 || this.state !== 'running' || this.snapshotOnly) return false
     // A replicator that just started has not finished its first sync.
     if (Date.now() - Date.parse(this.startedAt ?? '') < SETTLE_MS) return false
     if (!this.restoreCheck) return true
@@ -433,6 +455,7 @@ class Replicator {
         kept: files.length,
         lastError: this.snapshotError,
         restoreCheck: this.restoreCheck,
+        unchangedAt: unchangedSince(folder),
         problems: snapshotProblems(folder, this.snapshotError, this.restoreCheck, serviceStartMs),
       }
     }
@@ -528,6 +551,7 @@ function canonicalSpec(spec: DatabaseSpec): string {
 }
 
 function sameTarget(a: DatabaseSpec, b: DatabaseSpec): boolean {
+  if (a.replicaType === 'none' || b.replicaType === 'none') return a.replicaType === b.replicaType
   return describeReplica(a) === describeReplica(b) && (a.endpoint ?? '') === (b.endpoint ?? '')
 }
 
@@ -535,10 +559,16 @@ function validateSpec(body: unknown): DatabaseSpec {
   if (!body || typeof body !== 'object') throw new Error('expected a JSON object')
   const spec = body as DatabaseSpec
   if (typeof spec.dbPath !== 'string' || !isAbsolute(spec.dbPath)) throw new Error('dbPath must be an absolute path')
-  if (typeof spec.replicaPath !== 'string' || !spec.replicaPath) throw new Error('replicaPath is required')
-  if (spec.replicaType !== undefined && spec.replicaType !== 's3' && spec.replicaType !== 'file') {
-    throw new Error('replicaType must be "s3" or "file"')
+  if (spec.replicaType !== undefined && !['s3', 'file', 'none'].includes(spec.replicaType)) {
+    throw new Error('replicaType must be "s3", "file" or "none"')
   }
+  if (spec.replicaType === 'none') {
+    if (spec.replicaPath !== undefined) throw new Error('a snapshot-only database takes no replicaPath')
+    if (!existsSync(spec.dbPath))
+      throw new Error(`${spec.dbPath} does not exist; create the database before registering it`)
+    return { dbPath: canonicalDbPath(spec.dbPath), replicaType: 'none' }
+  }
+  if (typeof spec.replicaPath !== 'string' || !spec.replicaPath) throw new Error('replicaPath is required')
   if (spec.replicaType === 'file' && !isAbsolute(spec.replicaPath)) {
     throw new Error('a file replicaPath must be an absolute path')
   }
@@ -690,7 +720,11 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
           try {
             const file = await takeSnapshot(dbPath, config.settings, paths.workDir)
             r.snapshotError = null
-            r.write(`snapshot saved: ${file.path} (${file.bytes} bytes)`)
+            r.write(
+              file.unchanged
+                ? `unchanged since ${file.path}; no new snapshot`
+                : `snapshot saved: ${file.path} (${file.bytes} bytes)`,
+            )
           } catch (err) {
             r.snapshotError = { at: new Date().toISOString(), message: firstLine(err) }
             r.write(`snapshot failed: ${firstLine(err)}`)
@@ -779,7 +813,10 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
       if (!existing) {
         // Two databases writing one replica overwrite each other's history,
         // as when a copied clone registers its own database to the same path.
-        const sharing = Object.values(registry).find((s) => s.dbPath !== spec.dbPath && sameTarget(s, spec))
+        const sharing =
+          spec.replicaType === 'none'
+            ? undefined
+            : Object.values(registry).find((s) => s.dbPath !== spec.dbPath && sameTarget(s, spec))
         if (sharing) {
           return {
             status: 409,

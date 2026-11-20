@@ -76,7 +76,9 @@ export async function ensureService(paths: ServicePaths = servicePaths()): Promi
 
 function toSpec(opts: LitestreamOptions, dbPath: string): DatabaseSpec {
   const { name, configDir, envFile, logFile, ...rest } = opts
-  if (opts.replicaType === 'file') return { ...rest, dbPath, replicaPath: resolve(opts.replicaPath) }
+  if (opts.replicaType === 'none') return { ...rest, dbPath }
+  if (opts.replicaType === 'file')
+    return { ...rest, dbPath, replicaPath: opts.replicaPath && resolve(opts.replicaPath) }
   return { ...rest, ...resolveEnv(opts), dbPath }
 }
 

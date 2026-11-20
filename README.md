@@ -1,6 +1,6 @@
 # @purecontext/backup
 
-SQLite backup in two independent layers. A small background service runs one [Litestream](https://litestream.io) replicator per database, replicating it to S3-compatible storage or a local directory with point-in-time recovery. It can also take a verified snapshot of every database each day into a folder you choose, such as a synced Google Drive, rotated by day, week and month, and regularly restore the replica to prove it works.
+SQLite backup in two independent layers, or just the second. A small background service runs one [Litestream](https://litestream.io) replicator per database, replicating it to S3-compatible storage or a local directory with point-in-time recovery. It can also take a verified snapshot of every database each day into a folder you choose, such as a synced Google Drive, rotated by day, week and month, and regularly restore the replica to prove it works.
 
 This package was `@purecontext/litestream` through 0.3.4. The API is unchanged; only the name and the snapshots are new.
 
@@ -67,6 +67,16 @@ The service writes its status to `status.json` in its home after every health ch
 
 Set `replicaType: 'file'` and an absolute `replicaPath` to replicate to a local directory instead of S3. No credentials are needed. This works with the sidecar too.
 
+### Snapshot-only databases
+
+Set `replicaType: 'none'`, with no `replicaPath`, for a database that needs a daily copy and nothing more. No Litestream process runs for it, and it needs no credentials or Litestream binary. Its only backup is the daily snapshot, so it shows as a problem in status while snapshots are off or misconfigured.
+
+```ts
+await registerDatabase({ dbPath: './data/my-app.db', replicaType: 'none' })
+```
+
+It has no replica, so there are no restore checks for it. Any number of snapshot-only databases can be registered at once.
+
 ### Moving from the sidecar
 
 When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on the database when it registers and again at each health check. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
@@ -98,6 +108,7 @@ Turn them on in `~/.config/purecontext/backup.json`, or the file `PURECONTEXT_BA
 The tiers share files: one snapshot can be this month's, this week's and today's at once. With the defaults, at most 17 are kept per database. A tier set to 0 keeps nothing for itself, and at least one tier must keep something.
 
 - **Once a day.** Every five minutes the service checks whether each database has a snapshot from today, in local time, and takes one if not. A machine asleep at night catches up when it wakes.
+- **Only when it changed.** Each pass hashes its verified copy and compares the hash with the newest snapshot's, kept in the folder's `state.json`. SQLite's backup API copies pages exactly, so an unchanged database gives an identical copy. When the hashes match, no new file lands, and the pass records when it found the database unchanged. That covers the day, and status counts it as fresh. A database that sits unchanged for weeks keeps one snapshot and needs no others.
 - **Verified before it lands.** The copy is made with SQLite's backup API, which is safe while the database is in use, then switched to a single-file journal and run through `PRAGMA integrity_check`. Only a copy that passes is compressed and moved into the destination, under a temporary name first, so a synced folder never uploads a partial or damaged file and a bad copy never replaces a good one.
 - **Layout.** `<destination>/<host>/<database file>-<hash>/<database file>-<hash>-<UTC time>.db.gz`, with a `source.json` naming the database's path. Restore one with `gunzip -c <file> > restored.db`.
 - **Restore checks.** Every `restoreCheckDays`, the service restores the replica into a scratch file, checks its integrity, and compares its row count with the live database. Fewer than 90% of the live rows, a failed restore, or a damaged result is a problem. A failed check retries after an hour. Results are kept in `snapshots.json` in the service folder.
@@ -128,8 +139,8 @@ Environment variables are loaded non-destructively. If a variable is already set
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `dbPath` | yes | | Path to your SQLite database. |
-| `replicaPath` | yes | | Path within the S3 bucket, or an absolute directory for a file replica. |
-| `replicaType` | | `s3` | `s3` or `file`. |
+| `replicaPath` | unless `none` | | Path within the S3 bucket, or an absolute directory for a file replica. |
+| `replicaType` | | `s3` | `s3`, `file`, or `none` for snapshots only. |
 | `bucket` | | env var | S3 bucket name. |
 | `endpoint` | | env var | S3-compatible endpoint URL. |
 | `region` | | `auto` | S3 region. |

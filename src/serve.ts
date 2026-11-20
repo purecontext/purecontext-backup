@@ -638,15 +638,33 @@ export async function serve(paths: ServicePaths = servicePaths()): Promise<void>
   const replicators = new Map<string, Replicator>()
   const own = () => new Set([...replicators.values()].flatMap((r) => (r.child?.pid ? [r.child.pid] : [])))
 
-  let registry: Record<string, DatabaseSpec> = {}
-  try {
-    registry = JSON.parse(readFileSync(paths.registry, 'utf8')).dbs ?? {}
-  } catch {}
-  const saveRegistry = () => {
-    const tmp = `${paths.registry}.${process.pid}.tmp`
-    writeFileSync(tmp, `${JSON.stringify({ version: 1, dbs: registry }, null, 2)}\n`, { mode: 0o600 })
-    renameSync(tmp, paths.registry)
+  // Snapshot-only registrations live in a file of their own. A service from
+  // 0.4.3 or earlier resumes every entry in registry.json without checking it,
+  // and reads replicaType 'none' as an s3 replica at path "undefined", using
+  // the real credentials. It never opens the other file.
+  const readDbs = (file: string): Record<string, DatabaseSpec> => {
+    try {
+      return JSON.parse(readFileSync(file, 'utf8')).dbs ?? {}
+    } catch {
+      return {}
+    }
   }
+  const writeDbs = (file: string, dbs: Record<string, DatabaseSpec>) => {
+    const tmp = `${file}.${process.pid}.tmp`
+    writeFileSync(tmp, `${JSON.stringify({ version: 1, dbs }, null, 2)}\n`, { mode: 0o600 })
+    renameSync(tmp, file)
+  }
+  const replicated = readDbs(paths.registry)
+  const registry: Record<string, DatabaseSpec> = { ...replicated, ...readDbs(paths.snapshotRegistry) }
+  const saveRegistry = () => {
+    const specs = Object.entries(registry)
+    // The snapshot-only file is written first, so an entry moving out of
+    // registry.json is never in neither.
+    writeDbs(paths.snapshotRegistry, Object.fromEntries(specs.filter(([, s]) => s.replicaType === 'none')))
+    writeDbs(paths.registry, Object.fromEntries(specs.filter(([, s]) => s.replicaType !== 'none')))
+  }
+  // 0.4.4 kept them in registry.json; move them out before anything else runs.
+  if (Object.values(replicated).some((s) => s.replicaType === 'none')) saveRegistry()
 
   let queue: Promise<unknown> = Promise.resolve()
   const serial = <T>(fn: () => Promise<T>): Promise<T> => {

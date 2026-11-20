@@ -11,6 +11,8 @@ export interface ServicePaths {
   socket: string
   lock: string
   registry: string
+  /** Snapshot-only registrations, kept apart from the registry older services resume. */
+  snapshotRegistry: string
   log: string
   dbDir: string
   snapshotState: string
@@ -33,6 +35,7 @@ export function servicePaths(
     socket,
     lock: join(home, 'serve.lock'),
     registry: join(home, 'registry.json'),
+    snapshotRegistry: join(home, 'registry-snapshot-only.json'),
     log: join(home, 'serve.log'),
     dbDir: join(home, 'dbs'),
     snapshotState: join(home, 'snapshots.json'),

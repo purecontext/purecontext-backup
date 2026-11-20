@@ -558,6 +558,32 @@ describe('snapshot-only databases', () => {
     })
   })
 
+  test('snapshot-only registrations stay out of registry.json, which older services resume unchecked', async () => {
+    const { d, paths, env } = await start(true)
+    const a = join(d, 'a.db')
+    const c = join(d, 'c.db')
+    makeDb(a).close()
+    makeDb(c).close()
+    // A 0.4.4 service left its snapshot-only registration in registry.json.
+    const legacy = realpathSync(c)
+    writeFileSync(
+      paths.registry,
+      JSON.stringify({ version: 1, dbs: { [legacy]: { dbPath: legacy, replicaType: 'none' } } }),
+    )
+    await withEnv(env, () => registerDatabase({ dbPath: a, replicaType: 'none' }, paths))
+    const status = await until(async () => {
+      const s = await serviceStatus({}, paths)
+      return s?.dbs.length === 2 ? s : null
+    })
+    assert.deepEqual(status.dbs.map((db) => db.dbPath.split('/').pop()).sort(), ['a.db', 'c.db'])
+    const names = (file) =>
+      Object.keys(JSON.parse(readFileSync(file, 'utf8')).dbs)
+        .map((p) => p.split('/').pop())
+        .sort()
+    assert.deepEqual(names(paths.registry), [], 'nothing an older service could misread')
+    assert.deepEqual(names(paths.snapshotRegistry), ['a.db', 'c.db'])
+  })
+
   test('a replicaPath on a snapshot-only database is refused', async () => {
     const { d, paths, env } = await start(true)
     const a = join(d, 'a.db')

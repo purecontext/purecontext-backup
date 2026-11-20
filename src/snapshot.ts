@@ -259,7 +259,25 @@ const STATE_FILE = 'state.json'
 interface FolderState {
   file: string
   sha256: string
+  /** The landed file's size, so a newest snapshot rewritten in the destination is never re-confirmed. */
+  bytes?: number
   unchangedAt: string | null
+}
+
+// The newest snapshot is the one state.json describes, still at the size it landed at.
+function describesNewest(state: FolderState | null, newest: SnapshotFile | undefined): boolean {
+  return !!newest && !!state && basename(newest.path) === state.file && newest.bytes === state.bytes
+}
+
+function rotate(folder: string, keep: Keep): void {
+  const files = listSnapshots(folder)
+  const kept = selectKept(
+    files.map((f) => new Date(f.at)),
+    keep,
+  )
+  files.forEach((f, i) => {
+    if (!kept.has(i)) removeQuietly(f.path)
+  })
 }
 
 function readState(folder: string): FolderState | null {
@@ -287,7 +305,7 @@ async function sha256(path: string): Promise<string> {
 export function unchangedSince(folder: string): string | null {
   const newest = listSnapshots(folder).at(-1)
   const state = readState(folder)
-  if (!newest || !state?.unchangedAt || basename(newest.path) !== state.file) return null
+  if (!state?.unchangedAt || !describesNewest(state, newest)) return null
   return state.unchangedAt
 }
 
@@ -353,8 +371,10 @@ export async function takeSnapshot(
     hash = await sha256(work)
     const newest = listSnapshots(folder).at(-1)
     const state = readState(folder)
-    if (newest && state?.sha256 === hash && basename(newest.path) === state.file) {
+    if (newest && state?.sha256 === hash && describesNewest(state, newest)) {
       writeState(folder, { ...state, unchangedAt: now.toISOString() })
+      // Rotation still runs, so a lowered keep takes effect without waiting for a change.
+      rotate(folder, settings.keep)
       return { ...newest, unchanged: true }
     }
     // Compress on local disk, then copy and rename, so the synced folder only
@@ -366,20 +386,13 @@ export async function takeSnapshot(
     const landed = statSync(partial).size
     if (landed !== expected) throw new Error(`copy into the destination is short: ${landed} of ${expected} bytes`)
     renameSync(partial, target)
-    writeState(folder, { file: name, sha256: hash, unchangedAt: null })
+    writeState(folder, { file: name, sha256: hash, bytes: landed, unchangedAt: null })
   } finally {
     for (const suffix of ['', '-wal', '-shm', '-journal', '.gz']) removeQuietly(`${work}${suffix}`)
     removeQuietly(partial)
   }
 
-  const files = listSnapshots(folder)
-  const kept = selectKept(
-    files.map((f) => new Date(f.at)),
-    settings.keep,
-  )
-  files.forEach((f, i) => {
-    if (!kept.has(i)) removeQuietly(f.path)
-  })
+  rotate(folder, settings.keep)
   return { at: now.toISOString(), path: target, bytes: statSync(target).size, unchanged: false }
 }
 

@@ -79,7 +79,7 @@ It has no replica, so there are no restore checks for it. Any number of snapshot
 
 ### Moving from the sidecar
 
-When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on the database when it registers and again at each health check. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
+When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on a replicated database when it registers and again at each health check; it leaves a snapshot-only database's sidecars alone, so stop those yourself. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
 
 ## Snapshots
 

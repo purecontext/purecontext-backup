@@ -90,6 +90,15 @@ export function startLitestream(opts: LitestreamOptions): boolean {
 
 export function startLitestreamAll(dbs: LitestreamOptions[]): boolean {
   if (dbs.length === 0) return false
+  // Checked before anything stops the running replicator, so a call it can't
+  // serve leaves the current one replicating.
+  const unfit = dbs.find((db) => db.replicaType === 'none' || !db.replicaPath)
+  if (unfit) {
+    console.error(
+      `[litestream] not started — ${unfit.dbPath} has no replica (replicaType 'none' or no replicaPath). The running replicator, if any, is left alone.`,
+    )
+    return false
+  }
 
   loadLitestreamEnv(dbs[0].envFile)
   const missing = missingCredentials(dbs[0])

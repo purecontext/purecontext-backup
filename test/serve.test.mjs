@@ -667,6 +667,17 @@ describe('sidecar config', () => {
     )
   })
 
+  test('a database with no replica gets no config, and the sidecar refuses it without starting', async () => {
+    assert.throws(
+      () => config.generateConfig([{ dbPath: '/x.db', replicaType: 'none' }]),
+      /has no replica to configure/,
+    )
+    assert.throws(() => config.generateConfig([{ dbPath: '/x.db', replicaType: 'file' }]), /has no replicaPath/)
+    const { startLitestreamAll } = await import('../dist/sidecar.js')
+    assert.equal(startLitestreamAll([{ dbPath: '/x.db', replicaType: 'none' }]), false)
+    assert.equal(startLitestreamAll([{ dbPath: '/x.db', replicaType: 'file' }]), false)
+  })
+
   test('an s3 replica without credentials is reported', () => {
     const saved = { ...process.env }
     for (const k of Object.keys(process.env)) if (k.startsWith('LITESTREAM_')) delete process.env[k]

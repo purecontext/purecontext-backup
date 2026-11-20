@@ -15,7 +15,7 @@ import {
 import { type IncomingMessage, type ServerResponse, createServer } from 'node:http'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { promisify } from 'node:util'
-import { type LitestreamOptions, describeReplica, generateConfig, missingCredentials } from './config.js'
+import { type ReplicaSettings, describeReplica, generateConfig, missingCredentials } from './config.js'
 import { type ServicePaths, canonicalDbPath, databaseId, packageVersion, servicePaths } from './paths.js'
 import { isServing } from './rpc.js'
 import {
@@ -37,7 +37,8 @@ import { removeStatusFile, writeStatusFile } from './status-file.js'
 
 const execFileAsync = promisify(execFile)
 
-export type DatabaseSpec = Omit<LitestreamOptions, 'name' | 'configDir' | 'envFile' | 'logFile'>
+// The wire shape, checked field by field in validateSpec.
+export type DatabaseSpec = Omit<ReplicaSettings, 'name' | 'configDir' | 'envFile' | 'logFile'>
 
 export interface Health {
   ok: boolean

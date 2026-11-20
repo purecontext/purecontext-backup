@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -253,6 +254,49 @@ describe('snapshots', () => {
     assert.equal(listSnapshots(folder).length, 1)
   })
 
+  test('a newest snapshot rewritten in the destination is not trusted as unchanged', async () => {
+    const d = dir()
+    const dbPath = join(d, 'live.db')
+    makeDb(dbPath).close()
+    const settings = { destination: mkdest(d), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
+    const folder = snapshotFolder(settings.destination, dbPath)
+    const work = join(d, 'work')
+    const first = await takeSnapshot(dbPath, settings, work, local(2026, 10, 19, 9))
+    assert.equal((await takeSnapshot(dbPath, settings, work, local(2026, 10, 20, 9))).unchanged, true)
+    writeFileSync(first.path, 'junk', { flag: 'a' })
+    assert.equal(unchangedSince(folder), null, 'a file no longer the size it landed at is not confirmed')
+    const again = await takeSnapshot(dbPath, settings, work, local(2026, 10, 21, 9))
+    assert.equal(again.unchanged, false)
+    assert.equal(listSnapshots(folder).length, 2)
+  })
+
+  test('an unchanged pass still applies a lowered keep', async () => {
+    const d = dir()
+    const dbPath = join(d, 'live.db')
+    const live = makeDb(dbPath)
+    const settings = { destination: mkdest(d), keep: { daily: 7, weekly: 0, monthly: 0 }, restoreCheckDays: 0 }
+    const folder = snapshotFolder(settings.destination, dbPath)
+    const work = join(d, 'work')
+    for (const day of [19, 20, 21]) {
+      live.prepare('INSERT INTO t (v) VALUES (?)').run(`day ${day}`)
+      await takeSnapshot(dbPath, settings, work, local(2026, 10, day, 9))
+    }
+    live.close()
+    assert.equal(listSnapshots(folder).length, 3)
+    const newest = listSnapshots(folder).at(-1)
+    const pass = await takeSnapshot(
+      dbPath,
+      { ...settings, keep: { daily: 1, weekly: 0, monthly: 0 } },
+      work,
+      local(2026, 10, 22, 9),
+    )
+    assert.equal(pass.unchanged, true)
+    assert.deepEqual(
+      listSnapshots(folder).map((f) => f.path),
+      [newest.path],
+    )
+  })
+
   test('a damaged database lands nothing', async () => {
     const d = dir()
     const dbPath = join(d, 'damaged.db')
@@ -462,6 +506,56 @@ describe('snapshot-only databases', () => {
     })
     assert.match(status.dbs[0].health.problems[0], /snapshots are off, so nothing backs up this database/)
     assert.equal(status.ok, false)
+  })
+
+  test('with snapshots misconfigured, nothing backs it up, and status says so', async () => {
+    const { d, paths, env } = await start(true)
+    writeFileSync(join(d, 'backup.json'), '{ not json')
+    const a = join(d, 'a.db')
+    makeDb(a).close()
+    await withEnv(env, () => registerDatabase({ dbPath: a, replicaType: 'none' }, paths))
+    const status = await until(async () => {
+      const s = await serviceStatus({}, paths)
+      return s?.dbs[0]?.health ? s : null
+    })
+    assert.match(status.dbs[0].health.problems[0], /snapshots are misconfigured, so nothing backs up this database/)
+    assert.equal(status.ok, false)
+  })
+
+  test('a pass that finds it unchanged is reported in status and by the CLI', async () => {
+    const { d, paths, destination, env } = await start(true)
+    const a = join(d, 'a.db')
+    makeDb(a).close()
+    const canonical = realpathSync(a)
+    const yesterday = new Date(Date.now() - 86_400_000)
+    const keep = { daily: 3, weekly: 0, monthly: 0 }
+    await takeSnapshot(canonical, { destination, keep, restoreCheckDays: 0 }, join(d, 'work'), yesterday)
+    await withEnv(env, () => registerDatabase({ dbPath: a, replicaType: 'none' }, paths))
+    const status = await until(async () => {
+      const s = await serviceStatus({}, paths)
+      return s?.dbs[0]?.snapshot?.unchangedAt ? s : null
+    })
+    assert.equal(
+      listSnapshots(snapshotFolder(destination, canonical)).length,
+      1,
+      'no new file for an unchanged database',
+    )
+    const out = execFileSync(process.execPath, ['dist/cli.js', 'status'], {
+      env: { ...process.env, PURECONTEXT_LITESTREAM_HOME: paths.home },
+      encoding: 'utf8',
+    })
+    assert.match(out, /unchanged as of/)
+    assert.ok(status.dbs[0].snapshot.unchangedAt > yesterday.toISOString())
+  })
+
+  test('a replicated database re-sent as snapshot-only is refused', async () => {
+    const { d, paths, env } = await start(true)
+    const a = join(d, 'a.db')
+    makeDb(a).close()
+    await withEnv(env, async () => {
+      await registerDatabase({ dbPath: a, replicaType: 'file', replicaPath: join(d, 'replica') }, paths)
+      await assert.rejects(registerDatabase({ dbPath: a, replicaType: 'none' }, paths), /already replicated to file:/)
+    })
   })
 
   test('a replicaPath on a snapshot-only database is refused', async () => {

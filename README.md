@@ -37,7 +37,7 @@ Create the database before registering it; a path that does not exist is refused
 
 - **One replicator per database.** Registering the same database again with the same settings changes nothing. Changed settings restart its replicator. A different destination is refused until the database is unregistered. Any other litestream process replicating the same file, such as an older sidecar, is stopped first. When the process list cannot be read to check for one, the replicator does not start; it waits in backoff and tries again.
 - **One database per replica.** A second database registered to a destination another database already uses is refused, as when a copied clone registers its own database to the original's replica path. Two databases writing one replica would overwrite each other's history.
-- **Registrations persist.** They are kept in `registry.json` and resumed whenever the service starts. A registered database whose file no longer exists, such as a deleted clone, is dropped from the registry when the service resumes, at each health check, and at the next registration. The service stays up while any database is registered and exits after the last one is unregistered. A registration that arrives while it is shutting down is retried against the next service.
+- **Registrations persist.** They are kept in `registry.json` (snapshot-only ones in `registry-snapshot-only.json`, since a service from 0.4.3 or earlier would resume them as s3 replicas) and resumed whenever the service starts. A registered database whose file no longer exists, such as a deleted clone, is dropped from the registry when the service resumes, at each health check, and at the next registration. The service stays up while any database is registered and exits after the last one is unregistered. A registration that arrives while it is shutting down is retried against the next service.
 - **One service per home.** A lock decides between clients that start it at the same moment, and a lock left by a dead process is reclaimed.
 - **Upgrades.** A client newer than the running service stops it and starts its own version. The registrations carry over.
 - **Supervision.** A replicator that exits, or fails to start, is retried with backoff, up to one minute between attempts.
@@ -80,6 +80,10 @@ It has no replica, so there are no restore checks for it. Any number of snapshot
 ### Moving from the sidecar
 
 When a database moves to the service, every process that replicates it must move in the same release. The service stops any sidecar it finds on a replicated database when it registers and again at each health check; it leaves a snapshot-only database's sidecars alone, so stop those yourself. A process still on the old version that starts afterward runs its own sidecar until the next check, up to five minutes, with two replicators on one database. Restart every process that uses the database together.
+
+### Older services
+
+Every client on a machine shares one service. Whichever client starts it first runs its own version, and a newer client replaces an older service the next time it registers. While a service from 0.4.3 or earlier owns the folder, snapshot-only databases get no snapshots and do not appear in `status`, since it never reads `registry-snapshot-only.json`. Changes made through it reach only `registry.json`: a database it registers with a replica wins over a snapshot-only registration of the same file. To end the gap, move every client to 0.4.5 or later. 0.4.4 kept snapshot-only registrations in `registry.json`, where those services resume them as s3 replicas at the path `undefined`; 0.4.5 moves them out when it starts.
 
 ## Snapshots
 

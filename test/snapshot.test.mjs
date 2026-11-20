@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { after, describe, test } from 'node:test'
 import { gunzipSync } from 'node:zlib'
-import { registerDatabase, serviceStatus, stopService } from '../dist/index.js'
+import { ensureService, registerDatabase, serviceStatus, stopService } from '../dist/index.js'
 import { servicePaths } from '../dist/paths.js'
 import {
   listSnapshots,
@@ -556,6 +556,67 @@ describe('snapshot-only databases', () => {
       await registerDatabase({ dbPath: a, replicaType: 'file', replicaPath: join(d, 'replica') }, paths)
       await assert.rejects(registerDatabase({ dbPath: a, replicaType: 'none' }, paths), /already replicated to file:/)
     })
+  })
+
+  test('snapshot-only registrations stay out of registry.json, which older services resume unchecked', async () => {
+    const { d, paths, env } = await start(true)
+    const a = join(d, 'a.db')
+    const c = join(d, 'c.db')
+    makeDb(a).close()
+    makeDb(c).close()
+    // A 0.4.4 service left its snapshot-only registration in registry.json.
+    const legacy = realpathSync(c)
+    writeFileSync(
+      paths.registry,
+      JSON.stringify({ version: 1, dbs: { [legacy]: { dbPath: legacy, replicaType: 'none' } } }),
+    )
+    await withEnv(env, () => registerDatabase({ dbPath: a, replicaType: 'none' }, paths))
+    const status = await until(async () => {
+      const s = await serviceStatus({}, paths)
+      return s?.dbs.length === 2 ? s : null
+    })
+    assert.deepEqual(status.dbs.map((db) => db.dbPath.split('/').pop()).sort(), ['a.db', 'c.db'])
+    const names = (file) =>
+      Object.keys(JSON.parse(readFileSync(file, 'utf8')).dbs)
+        .map((p) => p.split('/').pop())
+        .sort()
+    assert.deepEqual(names(paths.registry), [], 'nothing an older service could misread')
+    assert.deepEqual(names(paths.snapshotRegistry), ['a.db', 'c.db'])
+  })
+
+  test('the service moves a snapshot-only registration out of registry.json as it starts', async () => {
+    const { d, paths, env } = await start(true)
+    const c = join(d, 'c.db')
+    makeDb(c).close()
+    const legacy = realpathSync(c)
+    writeFileSync(
+      paths.registry,
+      JSON.stringify({ version: 1, dbs: { [legacy]: { dbPath: legacy, replicaType: 'none' } } }),
+    )
+    await withEnv(env, () => ensureService(paths))
+    await until(async () => (await serviceStatus({}, paths))?.dbs.length === 1)
+    assert.deepEqual(JSON.parse(readFileSync(paths.registry, 'utf8')).dbs, {})
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(paths.snapshotRegistry, 'utf8')).dbs), [legacy])
+  })
+
+  test('a replica an older service registered wins over a snapshot-only registration of the same file', async () => {
+    const { d, paths, env } = await start(true)
+    const x = join(d, 'x.db')
+    makeDb(x).close()
+    const dbPath = realpathSync(x)
+    const replica = { dbPath, replicaType: 'file', replicaPath: join(d, 'replica') }
+    writeFileSync(
+      paths.snapshotRegistry,
+      JSON.stringify({ version: 1, dbs: { [dbPath]: { dbPath, replicaType: 'none' } } }),
+    )
+    writeFileSync(paths.registry, JSON.stringify({ version: 1, dbs: { [dbPath]: replica } }))
+    await withEnv(env, () => ensureService(paths))
+    const status = await until(async () => {
+      const s = await serviceStatus({}, paths)
+      return s?.dbs.length === 1 ? s : null
+    })
+    assert.match(status.dbs[0].replica, /^file:/)
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(paths.registry, 'utf8')).dbs), [dbPath])
   })
 
   test('a replicaPath on a snapshot-only database is refused', async () => {

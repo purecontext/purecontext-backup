@@ -120,6 +120,8 @@ export async function unregisterDatabase(
 ): Promise<{ status: 'removed' | 'unknown' | 'not-running'; dbPath: string }> {
   const canonical = canonicalDbPath(dbPath)
   if (!(await isServing(paths.socket))) return { status: 'not-running', dbPath: canonical }
+  // An older service cannot see snapshot-only registrations; replace it first.
+  await ensureService(paths)
   const res = await rpc(paths.socket, 'POST', '/unregister', { dbPath: canonical }, 30_000)
   if (res.status !== 200) throw new Error(`[backup] ${res.body?.error ?? `HTTP ${res.status}`}`)
   return res.body
